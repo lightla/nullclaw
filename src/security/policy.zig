@@ -211,7 +211,7 @@ pub const SecurityPolicy = struct {
             for (self.allowed_commands) |raw_allowed| {
                 const allowed = std.mem.trim(u8, raw_allowed, " \t\r\n");
                 if (allowed.len == 0) continue;
-                if (std.mem.eql(u8, allowed, "*") or std.mem.eql(u8, allowed, base_cmd)) {
+                if (allowlistEntryMatchesBase(allowed, base_cmd)) {
                     found = true;
                     break;
                 }
@@ -424,6 +424,23 @@ fn isArgsSafe(base_cmd: []const u8, full_cmd: []const u8) bool {
     }
 
     return true;
+}
+
+/// Allowlist entry formats:
+/// - "*" → any base command
+/// - "cmd" → exact base command
+/// - "cmd *" → shell-style wildcard alias for the same base command
+fn allowlistEntryMatchesBase(allowed_entry: []const u8, base_cmd: []const u8) bool {
+    if (std.mem.eql(u8, allowed_entry, "*")) return true;
+    if (std.mem.eql(u8, allowed_entry, base_cmd)) return true;
+
+    var parts = std.mem.tokenizeAny(u8, allowed_entry, " \t");
+    const first = parts.next() orelse return false;
+    const second = parts.next() orelse return false;
+    if (parts.next() != null) return false;
+    if (!std.mem.eql(u8, second, "*")) return false;
+
+    return std.mem.eql(u8, extractBasename(first), base_cmd);
 }
 
 fn containsStr(haystack: []const u8, needle: []const u8) bool {
@@ -919,6 +936,44 @@ test "allowed command entries are trimmed before matching" {
     p.allowed_commands = &.{ "  ls  ", "\techo\t" };
     try std.testing.expect(p.isCommandAllowed("ls -la"));
     try std.testing.expect(p.isCommandAllowed("echo ok"));
+}
+
+test "allowlist command-star entries match base command" {
+    var p = SecurityPolicy{ .autonomy = .full };
+    p.allowed_commands = &.{ "curl *", "wget *" };
+    try std.testing.expect(p.isCommandAllowed("curl https://example.com"));
+    try std.testing.expect(p.isCommandAllowed("wget https://example.com/file.txt"));
+    try std.testing.expect(!p.isCommandAllowed("ls -la"));
+}
+
+test "allowlist command-star entries support absolute command paths" {
+    var p = SecurityPolicy{ .autonomy = .full };
+    p.allowed_commands = &.{"/usr/bin/curl *"};
+    try std.testing.expect(p.isCommandAllowed("curl https://example.com"));
+}
+
+test "allowlist command-star entries still enforce command-specific arg safety" {
+    var p = SecurityPolicy{ .autonomy = .full };
+    p.allowed_commands = &.{"git *"};
+    try std.testing.expect(p.isCommandAllowed("git status"));
+    try std.testing.expect(!p.isCommandAllowed("git config core.editor vim"));
+}
+
+test "allowlist command-star entry reaches high-risk runtime gate" {
+    var blocked = SecurityPolicy{
+        .autonomy = .full,
+        .allowed_commands = &.{"curl *"},
+        .block_high_risk_commands = true,
+    };
+    try std.testing.expectError(error.HighRiskBlocked, blocked.validateCommandExecution("curl https://example.com", false));
+
+    var unblocked = SecurityPolicy{
+        .autonomy = .full,
+        .allowed_commands = &.{"curl *"},
+        .block_high_risk_commands = false,
+    };
+    const risk = try unblocked.validateCommandExecution("curl https://example.com", false);
+    try std.testing.expectEqual(CommandRiskLevel.high, risk);
 }
 
 test "containsSingleAmpersand detects correctly" {
