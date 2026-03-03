@@ -1,6 +1,29 @@
 const std = @import("std");
 
-const MAX_API_ERROR_CHARS: usize = 200;
+const DEFAULT_MAX_API_ERROR_CHARS: usize = 200;
+
+// Thread-local storage for runtime configuration
+threadlocal var max_api_error_chars: usize = DEFAULT_MAX_API_ERROR_CHARS;
+threadlocal var initialized: bool = false;
+
+fn readMaxApiErrorCharsFromEnv() usize {
+    if (std.process.getEnvVarOwned(std.heap.page_allocator, "NULLCLAW_MAX_ERROR_CHARS")) |env_val| {
+        defer std.heap.page_allocator.free(env_val);
+        const val = std.fmt.parseInt(usize, env_val, 10) catch DEFAULT_MAX_API_ERROR_CHARS;
+        // Limit to reasonable range: 200 to 10000
+        return if (val < 200) 200 else if (val > 10000) 10000 else val;
+    } else |_| {
+        return DEFAULT_MAX_API_ERROR_CHARS;
+    }
+}
+
+fn getMaxApiErrorChars() usize {
+    if (!initialized) {
+        max_api_error_chars = readMaxApiErrorCharsFromEnv();
+        initialized = true;
+    }
+    return max_api_error_chars;
+}
 
 fn isSecretChar(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == ':';
@@ -172,14 +195,15 @@ pub fn scrubToolOutput(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 pub fn sanitizeApiError(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     const scrubbed = try scrubSecretPatterns(allocator, input);
 
-    if (scrubbed.len <= MAX_API_ERROR_CHARS) {
+    const max_chars = getMaxApiErrorChars();
+    if (scrubbed.len <= max_chars) {
         return scrubbed;
     }
 
     // Truncate
-    var truncated = try allocator.alloc(u8, MAX_API_ERROR_CHARS + 3);
-    @memcpy(truncated[0..MAX_API_ERROR_CHARS], scrubbed[0..MAX_API_ERROR_CHARS]);
-    @memcpy(truncated[MAX_API_ERROR_CHARS..][0..3], "...");
+    var truncated = try allocator.alloc(u8, max_chars + 3);
+    @memcpy(truncated[0..max_chars], scrubbed[0..max_chars]);
+    @memcpy(truncated[max_chars..][0..3], "...");
     allocator.free(scrubbed);
     return truncated;
 }
@@ -219,7 +243,7 @@ test "sanitizeApiError truncates long errors" {
     @memset(long, 'a');
     const result = try sanitizeApiError(allocator, long);
     defer allocator.free(result);
-    try std.testing.expect(result.len <= MAX_API_ERROR_CHARS + 3);
+    try std.testing.expect(result.len <= DEFAULT_MAX_API_ERROR_CHARS + 3);
     try std.testing.expect(std.mem.endsWith(u8, result, "..."));
 }
 
