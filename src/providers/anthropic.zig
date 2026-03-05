@@ -141,6 +141,9 @@ pub const AnthropicProvider = struct {
         var text_parts: std.ArrayListUnmanaged(u8) = .empty;
         defer text_parts.deinit(allocator);
 
+        var thinking_parts: std.ArrayListUnmanaged(u8) = .empty;
+        defer thinking_parts.deinit(allocator);
+
         var tool_calls_list: std.ArrayListUnmanaged(ToolCall) = .empty;
 
         if (root_obj.get("content")) |content_arr| {
@@ -148,7 +151,16 @@ pub const AnthropicProvider = struct {
                 const obj = block.object;
                 const kind = if (obj.get("type")) |t| (if (t == .string) t.string else "") else "";
 
-                if (std.mem.eql(u8, kind, "text")) {
+                if (std.mem.eql(u8, kind, "thinking")) {
+                    if (obj.get("thinking")) |thinking| {
+                        if (thinking == .string and thinking.string.len > 0) {
+                            if (thinking_parts.items.len > 0) {
+                                try thinking_parts.append(allocator, '\n');
+                            }
+                            try thinking_parts.appendSlice(allocator, thinking.string);
+                        }
+                    }
+                } else if (std.mem.eql(u8, kind, "text")) {
                     if (obj.get("text")) |text| {
                         if (text == .string) {
                             const trimmed = std.mem.trim(u8, text.string, " \t\r\n");
@@ -198,6 +210,7 @@ pub const AnthropicProvider = struct {
 
         return .{
             .content = if (text_parts.items.len > 0) try text_parts.toOwnedSlice(allocator) else null,
+            .reasoning_content = if (thinking_parts.items.len > 0) try thinking_parts.toOwnedSlice(allocator) else null,
             .tool_calls = try tool_calls_list.toOwnedSlice(allocator),
             .usage = usage,
             .model = try allocator.dupe(u8, model_str),
@@ -877,6 +890,36 @@ test "provider getName returns Anthropic" {
     var p = AnthropicProvider.init(std.testing.allocator, "key", null);
     const prov = p.provider();
     try std.testing.expectEqualStrings("Anthropic", prov.getName());
+}
+
+test "parseNativeResponse thinking block populates reasoning_content" {
+    const body =
+        \\{"content":[{"type":"thinking","thinking":"I should reason carefully"},{"type":"text","text":"Here is my answer"}],"model":"claude-opus-4-5-20250514"}
+    ;
+    const response = try AnthropicProvider.parseNativeResponse(std.testing.allocator, body);
+    defer {
+        if (response.content) |c_val| std.testing.allocator.free(c_val);
+        if (response.reasoning_content) |rc| std.testing.allocator.free(rc);
+        std.testing.allocator.free(response.tool_calls);
+        std.testing.allocator.free(response.model);
+    }
+    try std.testing.expectEqualStrings("Here is my answer", response.content.?);
+    try std.testing.expectEqualStrings("I should reason carefully", response.reasoning_content.?);
+}
+
+test "parseNativeResponse thinking block only no visible text" {
+    const body =
+        \\{"content":[{"type":"thinking","thinking":"silent reasoning"}],"model":"m"}
+    ;
+    const response = try AnthropicProvider.parseNativeResponse(std.testing.allocator, body);
+    defer {
+        if (response.content) |c_val| std.testing.allocator.free(c_val);
+        if (response.reasoning_content) |rc| std.testing.allocator.free(rc);
+        std.testing.allocator.free(response.tool_calls);
+        std.testing.allocator.free(response.model);
+    }
+    try std.testing.expect(response.content == null);
+    try std.testing.expectEqualStrings("silent reasoning", response.reasoning_content.?);
 }
 
 test "parseNativeResponse usage missing defaults to zero" {

@@ -108,9 +108,20 @@ pub const OpenRouterProvider = struct {
                 const msg_obj = msg.object;
 
                 var content: ?[]const u8 = null;
+                var reasoning_content: ?[]const u8 = null;
                 if (msg_obj.get("content")) |c| {
                     if (c == .string) {
-                        content = try allocator.dupe(u8, c.string);
+                        const split = try root.splitThinkContent(allocator, c.string);
+                        content = split.visible;
+                        reasoning_content = split.reasoning;
+                    }
+                }
+
+                // OpenRouter also exposes reasoning in a dedicated field (some models)
+                if (reasoning_content == null) {
+                    if (msg_obj.get("reasoning_content")) |rc| {
+                        if (rc == .string and rc.string.len > 0)
+                            reasoning_content = try allocator.dupe(u8, rc.string);
                     }
                 }
 
@@ -154,6 +165,7 @@ pub const OpenRouterProvider = struct {
 
                 return .{
                     .content = content,
+                    .reasoning_content = reasoning_content,
                     .tool_calls = try tool_calls_list.toOwnedSlice(allocator),
                     .usage = usage,
                     .model = model_str,
@@ -776,3 +788,51 @@ test "streamChatImpl fails without key" {
 }
 
 fn testCallback(_: *anyopaque, _: root.StreamChunk) void {}
+
+test "parseNativeResponse extracts think tags into reasoning_content" {
+    const body =
+        \\{"choices":[{"message":{"content":"<think>step by step</think>Final answer"}}],"model":"kimi-k2","usage":{"prompt_tokens":5,"completion_tokens":10,"total_tokens":15}}
+    ;
+    const alloc = std.testing.allocator;
+    const response = try OpenRouterProvider.parseNativeResponse(alloc, body);
+    defer {
+        if (response.content) |c| alloc.free(c);
+        if (response.reasoning_content) |rc| alloc.free(rc);
+        alloc.free(response.tool_calls);
+        alloc.free(response.model);
+    }
+    try std.testing.expectEqualStrings("Final answer", response.content.?);
+    try std.testing.expectEqualStrings("step by step", response.reasoning_content.?);
+}
+
+test "parseNativeResponse reads native reasoning_content field" {
+    const body =
+        \\{"choices":[{"message":{"content":"The answer is 42","reasoning_content":"I computed this"}}],"model":"deepseek-r1","usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}
+    ;
+    const alloc = std.testing.allocator;
+    const response = try OpenRouterProvider.parseNativeResponse(alloc, body);
+    defer {
+        if (response.content) |c| alloc.free(c);
+        if (response.reasoning_content) |rc| alloc.free(rc);
+        alloc.free(response.tool_calls);
+        alloc.free(response.model);
+    }
+    try std.testing.expectEqualStrings("The answer is 42", response.content.?);
+    try std.testing.expectEqualStrings("I computed this", response.reasoning_content.?);
+}
+
+test "parseNativeResponse no think tags leaves reasoning_content null" {
+    const body =
+        \\{"choices":[{"message":{"content":"Plain response"}}],"model":"gpt-4o","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+    ;
+    const alloc = std.testing.allocator;
+    const response = try OpenRouterProvider.parseNativeResponse(alloc, body);
+    defer {
+        if (response.content) |c| alloc.free(c);
+        if (response.reasoning_content) |rc| alloc.free(rc);
+        alloc.free(response.tool_calls);
+        alloc.free(response.model);
+    }
+    try std.testing.expectEqualStrings("Plain response", response.content.?);
+    try std.testing.expect(response.reasoning_content == null);
+}

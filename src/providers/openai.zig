@@ -111,9 +111,12 @@ pub const OpenAiProvider = struct {
                 const msg_obj = msg.object;
 
                 var content: ?[]const u8 = null;
+                var reasoning_content: ?[]const u8 = null;
                 if (msg_obj.get("content")) |c| {
                     if (c == .string) {
-                        content = try allocator.dupe(u8, c.string);
+                        const split = try root.splitThinkContent(allocator, c.string);
+                        content = split.visible;
+                        reasoning_content = split.reasoning;
                     }
                 }
 
@@ -158,6 +161,7 @@ pub const OpenAiProvider = struct {
 
                 return .{
                     .content = content,
+                    .reasoning_content = reasoning_content,
                     .tool_calls = try tool_calls_list.toOwnedSlice(allocator),
                     .usage = usage,
                     .model = model_str,
