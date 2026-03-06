@@ -11,9 +11,9 @@ const Atomic = @import("../portable_atomic.zig").Atomic;
 const log = std.log.scoped(.telegram);
 const MEDIA_GROUP_FLUSH_SECS: u64 = 3;
 const TEXT_MESSAGE_DEBOUNCE_SECS: u64 = 3;
-// Telegram clients may split long messages below the 4096 hard limit.
-// Keep this threshold loose enough to catch real-world split chunks (~3.3k+).
-const TEXT_SPLIT_LIKELY_MIN_LEN: usize = 3000;
+// Telegram clients may split long messages well below the 4096 hard limit.
+// A lower threshold helps coalesce practical chunk sizes observed in the wild.
+const TEXT_SPLIT_LIKELY_MIN_LEN: usize = 800;
 const TEMP_MEDIA_SWEEP_INTERVAL_POLLS: u32 = 20;
 const TEMP_MEDIA_TTL_SECS: i64 = 24 * 60 * 60;
 const DRAFT_FLUSH_MIN_DELTA_BYTES: usize = 16;
@@ -4279,6 +4279,32 @@ test "telegram shouldDebounceTextMessage catches real-world ~3.4k split chunk" {
         .channel = "telegram",
         .timestamp = now,
         .message_id = 100,
+    };
+
+    try std.testing.expect(shouldDebounceTextMessage(&ch, msg));
+}
+
+test "telegram shouldDebounceTextMessage catches medium split chunk (~900 bytes)" {
+    const alloc = std.testing.allocator;
+    var ch = TelegramChannel.init(alloc, "123:ABC", &.{"*"}, &.{}, "allowlist");
+    defer {
+        ch.resetPendingTextBuffers();
+        ch.pending_text_messages.deinit(alloc);
+        ch.pending_text_received_at.deinit(alloc);
+    }
+
+    const now = root.nowEpochSecs();
+    const split_like_content = try alloc.alloc(u8, 900);
+    defer alloc.free(split_like_content);
+    @memset(split_like_content, 'x');
+
+    const msg: root.ChannelMessage = .{
+        .id = "user-b",
+        .sender = "chat-b",
+        .content = split_like_content,
+        .channel = "telegram",
+        .timestamp = now,
+        .message_id = 101,
     };
 
     try std.testing.expect(shouldDebounceTextMessage(&ch, msg));
