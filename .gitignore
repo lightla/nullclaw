@@ -25,3 +25,4 @@ config.signal.json
 .cursor/
 .trae/
 .codebuddy/
+zig-x86_64-linux-0.15.2.tar.xz
