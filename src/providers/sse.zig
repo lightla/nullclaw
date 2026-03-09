@@ -29,6 +29,79 @@ fn finalizeStreamResult(
     };
 }
 
+const CurlBodyArg = struct {
+    arg: []const u8,
+    temp_path_buf: [std.fs.max_path_bytes]u8 = undefined,
+    temp_path_len: usize = 0,
+    uses_temp_file: bool = false,
+
+    fn deinit(self: *const CurlBodyArg, allocator: std.mem.Allocator) void {
+        if (!self.uses_temp_file) return;
+        std.fs.deleteFileAbsolute(self.temp_path_buf[0..self.temp_path_len]) catch {};
+        allocator.free(self.arg);
+    }
+};
+
+fn prepareCurlBodyArg(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    log_enabled: bool,
+) !CurlBodyArg {
+    if (builtin.os.tag != .windows) {
+        return .{ .arg = body };
+    }
+
+    const debug_log = std.log.scoped(.sse);
+    var prepared: CurlBodyArg = .{ .arg = body };
+
+    const tmp_dir_path = platform.getTempDir(allocator) catch
+        return error.TempDirNotFound;
+    defer allocator.free(tmp_dir_path);
+
+    var tmp_dir = std.fs.openDirAbsolute(tmp_dir_path, .{}) catch
+        return error.TempDirNotFound;
+    defer tmp_dir.close();
+
+    const body_path = std.fmt.bufPrint(
+        &prepared.temp_path_buf,
+        "{s}{s}sse_body_{d}.tmp",
+        .{ tmp_dir_path, std.fs.path.sep_str, std.time.timestamp() },
+    ) catch return error.PathTooLong;
+    prepared.temp_path_len = body_path.len;
+    errdefer std.fs.deleteFileAbsolute(prepared.temp_path_buf[0..prepared.temp_path_len]) catch {};
+
+    var tmp_file = tmp_dir.createFile(
+        body_path[tmp_dir_path.len + 1 ..],
+        .{ .truncate = true, .exclusive = false },
+    ) catch return error.TempFileCreateFailed;
+
+    tmp_file.writeAll(body) catch {
+        tmp_file.close();
+        return error.TempFileWriteFailed;
+    };
+    tmp_file.close();
+
+    if (log_enabled) {
+        debug_log.info("Using temp file for curl body: {s}, body_len={d}", .{ body_path, body.len });
+    }
+
+    const verify_file = std.fs.openFileAbsolute(body_path, .{}) catch return error.TempFileCreateFailed;
+    defer verify_file.close();
+    const verify_stat = verify_file.stat() catch return error.TempFileCreateFailed;
+    if (log_enabled) {
+        debug_log.info("Temp body file size: {d} bytes", .{verify_stat.size});
+    }
+
+    for (prepared.temp_path_buf[0..prepared.temp_path_len]) |*c| {
+        if (c.* == '\\') c.* = '/';
+    }
+
+    prepared.arg = try std.fmt.allocPrint(allocator, "@{s}", .{prepared.temp_path_buf[0..prepared.temp_path_len]});
+    errdefer allocator.free(prepared.arg);
+    prepared.uses_temp_file = true;
+    return prepared;
+}
+
 /// Result of parsing a single SSE line.
 pub const SseLineResult = union(enum) {
     /// Text delta content (owned, caller frees).
@@ -162,76 +235,25 @@ pub fn curlStream(
     }
 
     // On Windows, command line length is limited to ~32767 chars.
-    // Use temp file for body to avoid NameTooLong error.
-    // Always use temp file on Windows for reliability.
-    const use_temp_file = builtin.os.tag == .windows or body.len > 2000;
-    var body_path_len: usize = 0;
-    var used_temp_file = false;
+    // Use a temp file there to avoid NameTooLong; keep other platforms in-memory.
+    var prepared_body = try prepareCurlBodyArg(allocator, body, log_enabled);
+    defer prepared_body.deinit(allocator);
 
-    var body_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const body_arg: []const u8 = if (use_temp_file) blk: {
-        const tmp_dir_path = platform.getTempDir(allocator) catch
-            return error.TempDirNotFound;
-        defer allocator.free(tmp_dir_path);
-
-        var tmp_dir = std.fs.openDirAbsolute(tmp_dir_path, .{}) catch
-            return error.TempDirNotFound;
-        defer tmp_dir.close();
-
-        const body_path = std.fmt.bufPrint(&body_path_buf, "{s}{s}sse_body_{d}.tmp", .{ tmp_dir_path, std.fs.path.sep_str, std.time.timestamp() }) catch
-            return error.PathTooLong;
-        body_path_len = body_path.len;
-
-        var tmp_file = tmp_dir.createFile(
-            body_path[tmp_dir_path.len + 1 ..],
-            .{ .truncate = true, .exclusive = false },
-        ) catch return error.TempFileCreateFailed;
-
-        tmp_file.writeAll(body) catch {
-            tmp_file.close();
-            return error.TempFileWriteFailed;
-        };
-        tmp_file.close();
-
-        used_temp_file = true;
-        errdefer std.fs.deleteFileAbsolute(body_path_buf[0..body_path_len]) catch {};
-        if (log_enabled) {
-            debug_log.info("Using temp file for body: {s}, body_len={d}", .{ body_path, body.len });
-        }
-        // Verify file was written correctly
-        const verify_file = std.fs.openFileAbsolute(body_path, .{}) catch return error.TempFileCreateFailed;
-        defer verify_file.close();
-        const verify_stat = verify_file.stat() catch return error.TempFileCreateFailed;
-        if (log_enabled) {
-            debug_log.info("Temp file size: {d} bytes", .{verify_stat.size});
-        }
-        if (comptime builtin.os.tag == .windows) {
-            for (body_path_buf[0..body_path_len]) |*c| {
-                if (c.* == '\\') c.* = '/';
-            }
-        }
-        break :blk try std.fmt.allocPrint(allocator, "@{s}", .{body_path_buf[0..body_path_len]});
-    } else body;
-
-    if (used_temp_file) {
+    if (prepared_body.uses_temp_file) {
         argv_buf[argc] = "--data-binary";
         argc += 1;
     } else {
         argv_buf[argc] = "-d";
         argc += 1;
     }
-    argv_buf[argc] = body_arg;
+    argv_buf[argc] = prepared_body.arg;
     argc += 1;
     argv_buf[argc] = url;
     argc += 1;
-    defer if (used_temp_file) {
-        std.fs.deleteFileAbsolute(body_path_buf[0..body_path_len]) catch {};
-        allocator.free(body_arg);
-    };
 
     // Debug: log the curl command
     if (log_enabled) {
-        debug_log.info("curl argc={d}, body_len={d}, used_temp_file={}, body_arg={s}", .{ argc, body.len, used_temp_file, body_arg });
+        debug_log.info("curl argc={d}, body_len={d}, used_temp_file={}, body_arg={s}", .{ argc, body.len, prepared_body.uses_temp_file, prepared_body.arg });
     }
 
     var cmd_buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -573,9 +595,17 @@ pub fn curlStreamAnthropic(
         argc += 1;
     }
 
-    argv_buf[argc] = "-d";
+    const log_enabled = verbose.isVerbose();
+    var prepared_body = try prepareCurlBodyArg(allocator, body, log_enabled);
+    defer prepared_body.deinit(allocator);
+
+    if (prepared_body.uses_temp_file) {
+        argv_buf[argc] = "--data-binary";
+    } else {
+        argv_buf[argc] = "-d";
+    }
     argc += 1;
-    argv_buf[argc] = body;
+    argv_buf[argc] = prepared_body.arg;
     argc += 1;
     argv_buf[argc] = url;
     argc += 1;
@@ -690,6 +720,21 @@ test "parseSseLine valid delta" {
             try std.testing.expectEqualStrings("Hello", text);
         },
         else => return error.TestUnexpectedResult,
+    }
+}
+
+test "prepareCurlBodyArg uses temp file only on Windows" {
+    const allocator = std.testing.allocator;
+    const body = [_]u8{'x'} ** 4096;
+    var prepared = try prepareCurlBodyArg(allocator, body[0..], false);
+    defer prepared.deinit(allocator);
+
+    if (builtin.os.tag == .windows) {
+        try std.testing.expect(prepared.uses_temp_file);
+        try std.testing.expect(std.mem.startsWith(u8, prepared.arg, "@"));
+    } else {
+        try std.testing.expect(!prepared.uses_temp_file);
+        try std.testing.expectEqualStrings(body[0..], prepared.arg);
     }
 }
 
