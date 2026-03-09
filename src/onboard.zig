@@ -130,6 +130,7 @@ pub const known_providers = [_]ProviderInfo{
     // --- Tier 10: CLI-based providers ---
     .{ .key = "claude-cli", .label = "Claude CLI (claude code, local)", .default_model = "claude-opus-4-6", .env_var = "ANTHROPIC_API_KEY" },
     .{ .key = "codex-cli", .label = "Codex CLI (OpenAI codex, local)", .default_model = "codex-mini-latest", .env_var = "OPENAI_API_KEY" },
+    .{ .key = "gemini-cli", .label = "Gemini CLI (google gemini, local)", .default_model = "gemini-2.5-pro", .env_var = "GEMINI_API_KEY" },
 };
 
 /// Canonicalize provider name (handle aliases).
@@ -139,6 +140,7 @@ pub fn canonicalProviderName(name: []const u8) []const u8 {
     if (std.mem.eql(u8, name, "google") or std.mem.eql(u8, name, "google-gemini")) return "gemini";
     if (std.mem.eql(u8, name, "vertex-ai") or std.mem.eql(u8, name, "google-vertex")) return "vertex";
     if (std.mem.eql(u8, name, "claude-code")) return "claude-cli";
+    if (std.mem.eql(u8, name, "google-cli")) return "gemini-cli";
     return name;
 }
 
@@ -239,6 +241,7 @@ pub fn fallbackModelsForProvider(provider: []const u8) []const []const u8 {
     if (std.mem.eql(u8, canonical, "ollama")) return &ollama_fallback;
     if (std.mem.eql(u8, canonical, "claude-cli")) return &claude_cli_fallback;
     if (std.mem.eql(u8, canonical, "codex-cli")) return &codex_cli_fallback;
+    if (std.mem.eql(u8, canonical, "gemini-cli")) return &gemini_cli_fallback;
 
     // For providers without a curated fallback list, return a single-item fallback
     // based on the onboarding default model for that provider.
@@ -298,14 +301,16 @@ const anthropic_fallback = [_][]const u8{
     "claude-haiku-4-5",
 };
 const gemini_fallback = [_][]const u8{
+    "gemini-2.0-pro-exp-02-05",
+    "gemini-2.0-flash-001",
+    "gemini-2.0-flash-lite-preview-02-05",
+    "gemini-2.0-flash-thinking-exp-01-21",
     "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
 };
 const vertex_fallback = [_][]const u8{
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
+    "gemini-2.0-pro-exp-02-05",
+    "gemini-2.0-flash-001",
+    "gemini-1.5-pro",
 };
 const deepseek_fallback = [_][]const u8{
     "deepseek-chat",
@@ -324,6 +329,14 @@ const claude_cli_fallback = [_][]const u8{
 
 const codex_cli_fallback = [_][]const u8{
     "codex-mini-latest",
+};
+
+const gemini_cli_fallback = [_][]const u8{
+    "latest",
+    "gemini-3.1-pro",
+    "gemini-3.0-pro",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
 };
 
 const MAX_MODELS = 20;
@@ -378,7 +391,8 @@ pub fn fetchModelsFromApi(allocator: std.mem.Allocator, provider: []const u8, ap
         std.mem.eql(u8, canonical, "deepseek") or
         std.mem.eql(u8, canonical, "ollama") or
         std.mem.eql(u8, canonical, "claude-cli") or
-        std.mem.eql(u8, canonical, "codex-cli"))
+        std.mem.eql(u8, canonical, "codex-cli") or
+        std.mem.eql(u8, canonical, "gemini-cli"))
     {
         const fallback = fallbackModelsForProvider(canonical);
         var result: std.ArrayListUnmanaged([]const u8) = .empty;

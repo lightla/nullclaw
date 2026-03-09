@@ -163,7 +163,27 @@ pub const SlackChannel = struct {
     /// `message_text`: the raw message text (used to detect bot mention).
     /// `bot_user_id`: the bot's own Slack user ID (for mention detection).
     pub fn shouldHandle(self: *const SlackChannel, sender_id: []const u8, is_dm: bool, message_text: []const u8, bot_user_id: ?[]const u8) bool {
-        const is_mention = if (bot_user_id) |bid| containsMention(message_text, bid) else false;
+        var is_mention = if (bot_user_id) |bid| containsMention(message_text, bid) else false;
+
+        // Extra: Allow calling by name without @ (key match)
+        if (!is_mention) {
+            const text_lower = self.allocator.dupe(u8, message_text) catch return false;
+            defer self.allocator.free(text_lower);
+            for (text_lower) |*c| {
+                c.* = std.ascii.toLower(c.*);
+            }
+
+            if (std.mem.indexOf(u8, text_lower, "nullclaw") != null or
+                std.mem.indexOf(u8, text_lower, "null claw") != null or
+                std.mem.indexOf(u8, text_lower, "hey nc") != null or
+                std.mem.indexOf(u8, text_lower, "hi nc") != null or
+                std.mem.indexOf(u8, text_lower, "hello nc") != null or
+                std.mem.indexOf(u8, text_lower, "/nc") != null)
+            {
+                is_mention = true;
+            }
+        }
+
         return root.checkPolicy(self.policy, sender_id, is_dm, is_mention);
     }
 

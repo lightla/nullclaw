@@ -11,6 +11,8 @@ const compatible = @import("compatible.zig");
 const claude_cli = @import("claude_cli.zig");
 const codex_cli = @import("codex_cli.zig");
 const openai_codex = @import("openai_codex.zig");
+const gemini_cli = @import("gemini_cli.zig");
+
 
 pub const ProviderKind = enum {
     anthropic_provider,
@@ -23,6 +25,7 @@ pub const ProviderKind = enum {
     claude_cli_provider,
     codex_cli_provider,
     openai_codex_provider,
+    gemini_cli_provider, // 👈 thêm
     unknown,
 };
 
@@ -191,6 +194,7 @@ const core_providers = std.StaticStringMap(ProviderKind).initComptime(.{
     .{ "openrouter", .openrouter_provider },
     .{ "ollama", .ollama_provider },
     .{ "gemini", .gemini_provider },
+    .{ "gemini-cli", .gemini_cli_provider },
     .{ "google", .gemini_provider },
     .{ "google-gemini", .gemini_provider },
     .{ "vertex", .vertex_provider },
@@ -252,6 +256,7 @@ pub const ProviderHolder = union(enum) {
     anthropic: anthropic.AnthropicProvider,
     openai: openai.OpenAiProvider,
     gemini: gemini.GeminiProvider,
+    gemini_cli: gemini_cli.GeminiCliProvider,
     vertex: vertex.VertexProvider,
     ollama: ollama.OllamaProvider,
     compatible: compatible.OpenAiCompatibleProvider,
@@ -266,6 +271,7 @@ pub const ProviderHolder = union(enum) {
             .anthropic => |*p| p.provider(),
             .openai => |*p| p.provider(),
             .gemini => |*p| p.provider(),
+            .gemini_cli => |*p| p.provider(),
             .vertex => |*p| p.provider(),
             .ollama => |*p| p.provider(),
             .compatible => |*p| p.provider(),
@@ -348,6 +354,10 @@ pub const ProviderHolder = union(enum) {
                 .{ .codex_cli = p }
             else |_|
                 .{ .openrouter = openrouter.OpenRouterProvider.init(allocator, api_key) },
+                .gemini_cli_provider => if (gemini_cli.GeminiCliProvider.init(allocator, null)) |p|
+    .{ .gemini_cli = p }
+else |_|
+    .{ .openrouter = openrouter.OpenRouterProvider.init(allocator, api_key) },        
             .openai_codex_provider => .{ .openai_codex = openai_codex.OpenAiCodexProvider.init(allocator, null) },
             // Unknown provider: if base_url is configured, treat as OpenAI-compatible;
             // otherwise fall back to OpenRouter.
