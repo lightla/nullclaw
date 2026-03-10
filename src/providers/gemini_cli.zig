@@ -9,28 +9,26 @@ const StreamChunk = root.StreamChunk;
 const StreamCallback = root.StreamCallback;
 const StreamChatResult = root.StreamChatResult;
 
-/// Provider that delegates to the `gemini` CLI with Streaming support.
+const log = std.log.scoped(.gemini_cli);
+
 pub const GeminiCliProvider = struct {
     allocator: std.mem.Allocator,
     model: []const u8,
 
-    const DEFAULT_MODEL = "auto";
-    const CLI_NAME = "gemini";
-    const TIMEOUT_NS: u64 = 120 * std.time.ns_per_s;
+    const InternalResult = struct {
+        content: []const u8,
+        usage: root.TokenUsage,
+    };
 
     pub fn init(allocator: std.mem.Allocator, model: ?[]const u8) !GeminiCliProvider {
-        try checkCliAvailable(allocator, CLI_NAME);
         return .{
             .allocator = allocator,
-            .model = model orelse DEFAULT_MODEL,
+            .model = model orelse "gemini-3-flash-preview",
         };
     }
 
     pub fn provider(self: *GeminiCliProvider) Provider {
-        return .{
-            .ptr = @ptrCast(self),
-            .vtable = &vtable,
-        };
+        return .{ .ptr = @ptrCast(self), .vtable = &vtable };
     }
 
     const vtable = Provider.VTable{
@@ -44,171 +42,102 @@ pub const GeminiCliProvider = struct {
         .stream_chat = streamChatImpl,
     };
 
-    fn supportsStreamingImpl(_: *anyopaque) bool {
-        return true;
-    }
-
-    fn chatWithSystemImpl(
-        ptr: *anyopaque,
-        allocator: std.mem.Allocator,
-        system_prompt: ?[]const u8,
-        message: []const u8,
-        model: []const u8,
-        _: f64,
-    ) anyerror![]const u8 {
+    fn chatImpl(ptr: *anyopaque, allocator: std.mem.Allocator, request: ChatRequest, model: []const u8, _: f64) anyerror!ChatResponse {
         const self: *GeminiCliProvider = @ptrCast(@alignCast(ptr));
         const effective_model = if (model.len > 0) model else self.model;
-
-        const prompt = if (system_prompt) |sys|
-            try std.fmt.allocPrint(allocator, "{s}\n\n{s}", .{ sys, message })
-        else
-            try allocator.dupe(u8, message);
+        var m_pure = effective_model;
+        var agent_name: []const u8 = "assistant";
+        if (std.mem.indexOf(u8, effective_model, "--")) |idx| {
+            m_pure = effective_model[0..idx];
+            agent_name = effective_model[idx + 2 ..];
+        }
+        const prompt = try constructFullAwarePrompt(allocator, request, agent_name);
         defer allocator.free(prompt);
-
-        return (try runGemini(allocator, prompt, effective_model, null, null)).content;
+        const res = try runGeminiFinal(allocator, prompt, m_pure, agent_name, null, null);
+        return ChatResponse{ .content = res.content, .model = try allocator.dupe(u8, effective_model), .usage = res.usage };
     }
 
-    fn chatImpl(
-        ptr: *anyopaque,
-        allocator: std.mem.Allocator,
-        request: ChatRequest,
-        model: []const u8,
-        _: f64,
-    ) anyerror!ChatResponse {
+    fn streamChatImpl(ptr: *anyopaque, allocator: std.mem.Allocator, request: ChatRequest, model: []const u8, _: f64, callback: StreamCallback, callback_ctx: *anyopaque) anyerror!StreamChatResult {
         const self: *GeminiCliProvider = @ptrCast(@alignCast(ptr));
         const effective_model = if (model.len > 0) model else self.model;
-
-        const prompt = extractLastUserMessage(request.messages) orelse return error.NoUserMessage;
-
-        const result = try runGemini(allocator, prompt, effective_model, null, null);
-
-        return ChatResponse{
-            .content = result.content,
-            .model = try allocator.dupe(u8, effective_model),
-            .usage = result.usage,
-        };
+        var m_pure = effective_model;
+        var agent_name: []const u8 = "assistant";
+        if (std.mem.indexOf(u8, effective_model, "--")) |idx| {
+            m_pure = effective_model[0..idx];
+            agent_name = effective_model[idx + 2 ..];
+        }
+        const prompt = try constructFullAwarePrompt(allocator, request, agent_name);
+        defer allocator.free(prompt);
+        const res = try runGeminiFinal(allocator, prompt, m_pure, agent_name, callback, callback_ctx);
+        callback(callback_ctx, .{ .delta = "", .is_final = true, .token_count = 0 });
+        return StreamChatResult{ .content = res.content, .usage = res.usage };
     }
 
-    fn streamChatImpl(
-        ptr: *anyopaque,
-        allocator: std.mem.Allocator,
-        request: ChatRequest,
-        model: []const u8,
-        _: f64,
-        callback: StreamCallback,
-        callback_ctx: *anyopaque,
-    ) anyerror!StreamChatResult {
-        const self: *GeminiCliProvider = @ptrCast(@alignCast(ptr));
-        const effective_model = if (model.len > 0) model else self.model;
-        const prompt = extractLastUserMessage(request.messages) orelse return error.NoUserMessage;
-
-        const res = try runGemini(allocator, prompt, effective_model, callback, callback_ctx);
-        return StreamChatResult{
-            .content = res.content,
-            .usage = res.usage,
-        };
-    }
-
-    fn supportsNativeToolsImpl(_: *anyopaque) bool {
-        return false;
-    }
-
-    fn supportsVisionImpl(_: *anyopaque) bool {
-        return false;
-    }
-
-    fn getNameImpl(_: *anyopaque) []const u8 {
-        return "gemini-cli";
-    }
-
-    fn deinitImpl(_: *anyopaque) void {}
-
-    const InternalResult = struct {
-        content: []const u8,
-        usage: root.TokenUsage = .{},
-    };
-
-    fn runGemini(
+    fn runGeminiFinal(
         allocator: std.mem.Allocator,
         prompt: []const u8,
-        model: []const u8,
+        model_name: []const u8,
+        agent_name: []const u8,
         stream_cb: ?StreamCallback,
         cb_ctx: ?*anyopaque,
     ) !InternalResult {
-        var argv_list: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer argv_list.deinit(allocator);
-
-        try argv_list.append(allocator, CLI_NAME);
-        try argv_list.append(allocator, "-p");
-        try argv_list.append(allocator, prompt);
-        try argv_list.append(allocator, "--output-format");
-        try argv_list.append(allocator, "stream-json");
-
-        if (!std.mem.eql(u8, model, "auto") and !std.mem.eql(u8, model, "latest")) {
-            try argv_list.append(allocator, "-m");
-            try argv_list.append(allocator, model);
+        log.info("Thực thi Gemini cho {s} (Model: {s})", .{agent_name, model_name});
+        var argv = std.ArrayListUnmanaged([]const u8).empty;
+        defer {
+            for (argv.items) |arg| allocator.free(arg);
+            argv.deinit(allocator);
         }
+        try argv.append(allocator, try allocator.dupe(u8, "gemini"));
+        try argv.append(allocator, try allocator.dupe(u8, "-m"));
+        try argv.append(allocator, try allocator.dupe(u8, model_name));
+        try argv.append(allocator, try allocator.dupe(u8, "--output-format"));
+        try argv.append(allocator, try allocator.dupe(u8, "stream-json"));
+        try argv.append(allocator, try allocator.dupe(u8, "--yolo"));
 
-        var child = std.process.Child.init(argv_list.items, allocator);
+        var child = std.process.Child.init(argv.items, allocator);
+        child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
-
         try child.spawn();
 
-        var full_content: std.ArrayListUnmanaged(u8) = .empty;
-        errdefer full_content.deinit(allocator);
+        if (child.stdin) |s| {
+            try s.writeAll(prompt);
+            s.close();
+            child.stdin = null;
+        }
 
-        const stdout_file = child.stdout.?;
-        var line_buf: std.ArrayListUnmanaged(u8) = .empty;
+        var full_content = std.ArrayListUnmanaged(u8).empty;
+        errdefer full_content.deinit(allocator);
+        const usage = root.TokenUsage{};
+        var line_buf = std.ArrayListUnmanaged(u8).empty;
         defer line_buf.deinit(allocator);
 
-        var usage = root.TokenUsage{};
-        var read_buf: [4096]u8 = undefined;
-
-        // Manual line-by-line reading for maximum compatibility
+        var read_buf: [8192]u8 = undefined;
         while (true) {
-            const n = stdout_file.read(&read_buf) catch break;
+            const n = try child.stdout.?.read(&read_buf);
             if (n == 0) break;
-
             for (read_buf[0..n]) |byte| {
                 if (byte == '\n') {
-                    const line = line_buf.items;
-                    const trimmed = std.mem.trim(u8, line, " \t\r\n");
-                    if (trimmed.len > 0 and std.mem.startsWith(u8, trimmed, "{")) {
-                        const parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{}) catch {
+                    const line = std.mem.trim(u8, line_buf.items, " \t\r\n");
+                    if (line.len > 0 and std.mem.startsWith(u8, line, "{")) {
+                        const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch {
                             line_buf.clearRetainingCapacity();
                             continue;
                         };
                         defer parsed.deinit();
-
                         if (parsed.value == .object) {
                             const obj = parsed.value.object;
-                            const type_val = obj.get("type") orelse continue;
-                            
-                            if (type_val == .string and std.mem.eql(u8, type_val.string, "message")) {
-                                if (obj.get("role")) |role| {
-                                    if (role == .string and std.mem.eql(u8, role.string, "assistant")) {
-                                        if (obj.get("content")) |c| {
-                                            if (c == .string) {
-                                                try full_content.appendSlice(allocator, c.string);
-                                                if (stream_cb) |cb| {
-                                                    cb(cb_ctx.?, .{
-                                                        .delta = c.string,
-                                                        .is_final = false,
-                                                        .token_count = 0,
-                                                    });
+                            if (obj.get("type")) |t| {
+                                if (std.mem.eql(u8, t.string, "message")) {
+                                    if (obj.get("role")) |rv| {
+                                        if (std.mem.eql(u8, rv.string, "assistant")) {
+                                            if (obj.get("content")) |c| {
+                                                if (c == .string) {
+                                                    try full_content.appendSlice(allocator, c.string);
+                                                    if (stream_cb) |cb| cb(cb_ctx.?, .{ .delta = c.string, .is_final = false, .token_count = 0 });
                                                 }
                                             }
                                         }
-                                    }
-                                }
-                            } else if (type_val == .string and std.mem.eql(u8, type_val.string, "result")) {
-                                if (obj.get("stats")) |stats_val| {
-                                    if (stats_val == .object) {
-                                        const stats = stats_val.object;
-                                        usage.prompt_tokens = if (stats.get("input_tokens")) |it| (if (it == .integer) @intCast(it.integer) else 0) else 0;
-                                        usage.completion_tokens = if (stats.get("output_tokens")) |ot| (if (ot == .integer) @intCast(ot.integer) else 0) else 0;
-                                        usage.total_tokens = if (stats.get("total_tokens")) |tt| (if (tt == .integer) @intCast(tt.integer) else 0) else 0;
                                     }
                                 }
                             }
@@ -220,65 +149,40 @@ pub const GeminiCliProvider = struct {
                 }
             }
         }
-
-        const stderr_result = child.stderr.?.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
-            _ = child.wait() catch {};
-            return err;
-        };
-        defer allocator.free(stderr_result);
-
-        const term = try child.wait();
-        switch (term) {
-            .Exited => |code| {
-                if (code != 0) {
-                    std.debug.print("Gemini CLI error (code {d}): {s}\n", .{ code, stderr_result });
-                    return error.CliProcessFailed;
-                }
-            },
-            else => return error.CliProcessFailed,
+        
+        const err_out = try child.stderr.?.readToEndAlloc(allocator, 4096);
+        defer allocator.free(err_out);
+        _ = child.wait() catch {};
+        
+        if (full_content.items.len == 0) {
+            if (err_out.len > 0) return InternalResult{ .content = try std.fmt.allocPrint(allocator, "Lỗi Gemini CLI: {s}", .{err_out}), .usage = usage };
+            try full_content.appendSlice(allocator, "Hệ thống không trả về phản hồi văn bản.");
         }
-
-        if (stream_cb) |cb| {
-            cb(cb_ctx.?, .{
-                .delta = "",
-                .is_final = true,
-                .token_count = 0,
-            });
-        }
-
-        return InternalResult{
-            .content = try full_content.toOwnedSlice(allocator),
-            .usage = usage,
-        };
+        return InternalResult{ .content = try full_content.toOwnedSlice(allocator), .usage = usage };
     }
+
+    fn chatWithSystemImpl(ptr: *anyopaque, allocator: std.mem.Allocator, _: ?[]const u8, message: []const u8, model: []const u8, _: f64) anyerror![]const u8 {
+        _ = ptr;
+        const res = try runGeminiFinal(allocator, message, model, "system", null, null);
+        return res.content;
+    }
+
+    fn supportsNativeToolsImpl(_: *anyopaque) bool { return false; }
+    fn supportsVisionImpl(_: *anyopaque) bool { return false; }
+    fn supportsStreamingImpl(_: *anyopaque) bool { return true; }
+    fn getNameImpl(_: *anyopaque) []const u8 { return "gemini-cli"; }
+    fn deinitImpl(_: *anyopaque) void {}
 };
 
-/// Check if CLI exists
-fn checkCliAvailable(allocator: std.mem.Allocator, cli_name: []const u8) !void {
-    const argv = [_][]const u8{ "which", cli_name };
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-    try child.spawn();
-    const out = child.stdout.?.readToEndAlloc(allocator, 4096) catch {
-        _ = child.wait() catch {};
-        return error.CliNotFound;
-    };
-    allocator.free(out);
-    const term = try child.wait();
-    switch (term) {
-        .Exited => |code| {
-            if (code != 0) return error.CliNotFound;
-        },
-        else => return error.CliNotFound,
+fn constructFullAwarePrompt(allocator: std.mem.Allocator, request: ChatRequest, agent_name: []const u8) ![]const u8 {
+    var full_prompt = std.ArrayListUnmanaged(u8).empty;
+    errdefer full_prompt.deinit(allocator);
+    try std.fmt.format(full_prompt.writer(allocator), "Mày là {s} trên Slack. Hãy trả lời câu hỏi sau:\\n\\n", .{agent_name});
+    for (request.messages) |msg| {
+        const tag = if (msg.role == .user) "User: " else "Assistant: ";
+        try full_prompt.appendSlice(allocator, tag);
+        try full_prompt.appendSlice(allocator, msg.content);
+        try full_prompt.appendSlice(allocator, "\\n\\n");
     }
-}
-
-fn extractLastUserMessage(messages: []const ChatMessage) ?[]const u8 {
-    var i = messages.len;
-    while (i > 0) {
-        i -= 1;
-        if (messages[i].role == .user) return messages[i].content;
-    }
-    return null;
+    return full_prompt.toOwnedSlice(allocator);
 }

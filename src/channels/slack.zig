@@ -450,6 +450,9 @@ pub const SlackChannel = struct {
         msg_obj: std.json.ObjectMap,
         channel_id: []const u8,
     ) !void {
+        if (msg_obj.get("bot_id")) |_| return;
+        if (msg_obj.get("subtype")) |s| if (std.mem.eql(u8, s.string, "bot_message")) return;
+
         if (msg_obj.get("subtype")) |sub_val| {
             if (sub_val == .string and sub_val.string.len > 0) return;
         }
@@ -873,7 +876,36 @@ pub const SlackChannel = struct {
 
     /// Send a message to a Slack channel via chat.postMessage API.
     /// The target may contain "channel_id:thread_ts" for threaded replies.
-    pub fn sendMessage(self: *SlackChannel, target_channel: []const u8, text: []const u8) !void {
+    
+    fn dispatchToAgent(
+        self: *SlackChannel,
+        raw_text: []const u8,
+        agent_name: []const u8,
+        sender_id: []const u8,
+        channel_id: []const u8,
+        session_key: []const u8,
+        msg_obj: std.json.ObjectMap,
+    ) !void {
+        const message_ts = if (msg_obj.get("ts")) |ts_val| ts_val.string else null;
+        const thread_ts = if (msg_obj.get("thread_ts")) |thread_ts_val| thread_ts_val.string else null;
+        const is_thread_reply = if (thread_ts) |tts| if (message_ts) |mts| !std.mem.eql(u8, tts, mts) else true else false;
+        const effective_thread_ts: ?[]const u8 = switch (self.reply_to_mode) {
+            .off => if (is_thread_reply) thread_ts else null,
+            .all => thread_ts orelse message_ts,
+        };
+        const chat_id = if (effective_thread_ts) |tts| try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ channel_id, tts }) else try self.allocator.dupe(u8, channel_id);
+        defer self.allocator.free(chat_id);
+        const text = try std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ agent_name, raw_text });
+        defer self.allocator.free(text);
+        
+        var metadata = std.ArrayList(u8).init(self.allocator);
+        defer metadata.deinit();
+        try metadata.writer().print("{{\"account_id\":\"{s}\",\"agent_name\":\"{s}\",\"channel_id\":\"{s}\",\"agent\":\"{s}\"}}", .{self.account_id, agent_name, channel_id, agent_name});
+
+        const inbound = try bus_mod.makeInboundFull(self.allocator, "slack", sender_id, chat_id, text, session_key, &.{}, metadata.items);
+        if (self.bus) |b| b.publishInbound(inbound) catch { inbound.deinit(self.allocator); } else inbound.deinit(self.allocator);
+    }
+pub fn sendMessage(self: *SlackChannel, target_channel: []const u8, text: []const u8) !void {
         const url = API_BASE ++ "/chat.postMessage";
 
         // Parse target for thread_ts (channel_id:thread_ts)
