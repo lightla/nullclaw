@@ -157,37 +157,43 @@ nullclaw --help
 
 ### 3) Common commands
 
+#### 🛠️ Configuration Wizard (Slack, Gemini, etc.)
+
+**Run this to add any new channel (Slack, Discord, Telegram) or AI provider:**
 ```bash
-
-# Quick setup
-nullclaw onboard --api-key sk-... --provider openrouter
-
-# Or interactive wizard
 nullclaw onboard --interactive
+```
 
-# Chat
-nullclaw agent -m "Hello, nullclaw!"
-
-# Interactive mode
+#### 💬 Chat & Interaction
+```bash
+# Start a chat session
 nullclaw agent
 
-# Start gateway runtime (gateway + all configured channels/accounts + heartbeat + scheduler)
-nullclaw gateway                # default: 127.0.0.1:3000
-nullclaw gateway --port 8080    # custom port
+# Send a single message
+nullclaw agent -m "Hello, nullclaw!"
 
-# Check status
-nullclaw status
+# List models for Gemini CLI (login-based)
+nullclaw --list-models --provider gemini-cli
+```
 
-# Run system diagnostics
-nullclaw doctor
-
-# Check channel health
-nullclaw channel status
-
-# Start specific channels
+#### 📡 Channels & Gateway
+```bash
+# Start specific channels (After onboarding)
+nullclaw channel start slack
 nullclaw channel start telegram
 nullclaw channel start discord
 nullclaw channel start signal
+
+# Start all configured channels via gateway
+nullclaw gateway
+```
+
+#### 🏥 Diagnostics & Status
+```bash
+nullclaw status
+nullclaw doctor
+nullclaw channel status
+```
 
 # Manage background service
 nullclaw service install
