@@ -1,6 +1,11 @@
 # NullClaw AI System Context - Sang Vu Edition
 
 ########### NEW REQUIREMENT ##############
+
+0. Với Provider Gemini Cli
++ Bỏ cơ chế gọi qua gemini prompt, phải khởi động các instance gemni cli lên, luôn sẵn sàng chờ lệnh
+    + số lượng instance gemini = số actor
+
 1. Cần 1 file config (tùy chọn json, yaml, toml), bạn tùy chọn sao cho dễ đọc nhất với zig
     + Nội dung cần có:
         + 1. Danh sách actor (cụ thể là bot) cho slack (sau này mở rộng lên app khác như tele)
