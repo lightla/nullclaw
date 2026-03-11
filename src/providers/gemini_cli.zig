@@ -87,6 +87,7 @@ pub const GeminiCliProvider = struct {
         stream_cb: ?StreamCallback,
         cb_ctx: ?*anyopaque,
     ) !InternalResult {
+        _ = agent_name;
         var argv = std.ArrayListUnmanaged([]const u8).empty;
         defer {
             for (argv.items) |arg| allocator.free(arg);
@@ -95,8 +96,7 @@ pub const GeminiCliProvider = struct {
         try argv.append(allocator, try allocator.dupe(u8, "gemini"));
         try argv.append(allocator, try allocator.dupe(u8, "-m"));
         try argv.append(allocator, try allocator.dupe(u8, model_name));
-        try argv.append(allocator, try allocator.dupe(u8, "--resume"));
-        try argv.append(allocator, try allocator.dupe(u8, agent_name));
+        // Remove --resume since NullClaw manages history and agent_name is not a valid UUID session ID
         try argv.append(allocator, try allocator.dupe(u8, "--output-format"));
         try argv.append(allocator, try allocator.dupe(u8, "stream-json"));
         try argv.append(allocator, try allocator.dupe(u8, "--yolo"));
@@ -183,16 +183,34 @@ fn constructFullAwarePrompt(allocator: std.mem.Allocator, request: ChatRequest, 
     var full_prompt = std.ArrayListUnmanaged(u8).empty;
     errdefer full_prompt.deinit(allocator);
     
-    try std.fmt.format(full_prompt.writer(allocator), "CHỈ THỊ HỆ THỐNG: Mày là {s} trên Slack. Hãy trả lời câu hỏi cuối cùng của người dùng dựa trên lịch sử hội thoại dưới đây. Tuyệt đối không lặp lại lịch sử, không in rác hệ thống.\n\n[LỊCH SỬ HỘI THOẠI]\n", .{agent_name});
+    try std.fmt.format(full_prompt.writer(allocator), "CHỈ THỊ HỆ THỐNG: Mày là {s} trên Slack. Hãy trả lời câu hỏi cuối cùng của người dùng. Tuyệt đối không lặp lại lịch sử, không in rác hệ thống.\n\n", .{agent_name});
     
+    // Build conversation history, skipping system messages
+    var has_history = false;
     for (request.messages) |msg| {
+        if (msg.role == .system) continue; // Skip system prompt — don't include in conversation
+        if (!has_history) {
+            try full_prompt.appendSlice(allocator, "[LỊCH SỬ HỘI THOẠI]\n");
+            has_history = true;
+        }
         const role = if (msg.role == .user) "Người dùng" else "Bạn";
         try std.fmt.format(full_prompt.writer(allocator), "- {s}: {s}\n", .{role, msg.content});
     }
     
-    try full_prompt.appendSlice(allocator, "\n[CÂU HỎI CUỐI CÙNG]: ");
-    if (request.messages.len > 0) {
-        try full_prompt.appendSlice(allocator, request.messages[request.messages.len-1].content);
+    // Find the last user message for [CÂU HỎI CUỐI CÙNG]
+    var last_user_msg: ?[]const u8 = null;
+    var i = request.messages.len;
+    while (i > 0) {
+        i -= 1;
+        if (request.messages[i].role == .user) {
+            last_user_msg = request.messages[i].content;
+            break;
+        }
+    }
+    
+    if (last_user_msg) |user_msg| {
+        try full_prompt.appendSlice(allocator, "\n[CÂU HỎI CUỐI CÙNG]: ");
+        try full_prompt.appendSlice(allocator, user_msg);
     }
     
     try full_prompt.appendSlice(allocator, "\n\nTRẢ LỜI NGAY: ");
