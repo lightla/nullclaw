@@ -110,7 +110,7 @@ pub const SlackChannel = struct {
         try metadata.writer(self.allocator).print("{{\"account_id\":\"{s}\",\"agent_name\":\"{s}\",\"channel_id\":\"{s}\",\"ts\":\"{s}\"}}", .{ self.account_id, agent_name, channel_id, message_ts });
 
         const inbound = try bus_mod.makeInboundFull(self.allocator, "slack", sender_id, chat_id, tagged_text, session_key, &.{}, metadata.items);
-        if (self.bus) |b| b.publishInbound(inbound) catch |err| { log.err("LỖI BUS: {}", .{err}); inbound.deinit(self.allocator); } else inbound.deinit(self.allocator);
+        if (self.bus == null) log.err("NGUY HIỂM: Bus của NullClaw đang bị NULL!", .{}); if (self.bus) |b| b.publishInbound(inbound) catch |err| { log.err("LỖI BUS: {}", .{err}); inbound.deinit(self.allocator); } else inbound.deinit(self.allocator);
     }
 
     pub fn sendMessage(self: *SlackChannel, target_channel: []const u8, text: []const u8) !void {

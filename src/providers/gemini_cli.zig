@@ -33,6 +33,7 @@ pub const GeminiCliProvider = struct {
     };
 
     fn chatImpl(ptr: *anyopaque, allocator: std.mem.Allocator, request: ChatRequest, model: []const u8, _: f64) anyerror!ChatResponse {
+        log.info("TIN NHẮN ĐÃ CHẠM VÀO PROVIDER! Agent: {s}", .{model});
         const self: *GeminiCliProvider = @ptrCast(@alignCast(ptr));
         const effective_model = if (model.len > 0) model else self.model;
         var m_pure = effective_model;
