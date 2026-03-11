@@ -113,7 +113,11 @@ pub const SlackChannel = struct {
         if (self.bus == null) log.err("NGUY HIỂM: Bus của NullClaw đang bị NULL!", .{}); if (self.bus) |b| b.publishInbound(inbound) catch |err| { log.err("LỖI BUS: {}", .{err}); inbound.deinit(self.allocator); } else inbound.deinit(self.allocator);
     }
 
-    pub fn sendMessage(self: *SlackChannel, target_channel: []const u8, text: []const u8) !void {
+    
+    pub fn setBus(self: *SlackChannel, b: *bus_mod.Bus) void {
+        self.bus = b;
+    }
+pub fn sendMessage(self: *SlackChannel, target_channel: []const u8, text: []const u8) !void {
         if (text.len == 0) return;
         const url = API_BASE ++ "/chat.postMessage";
         const actual_channel = self.parseTarget(target_channel);
