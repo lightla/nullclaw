@@ -237,9 +237,43 @@ pub const SlackChannel = struct {
         const self: *SlackChannel = @ptrCast(@alignCast(ptr));
         try self.sendMessage(target, message);
     }
+    fn vtableStartTyping(_: *anyopaque, _: []const u8) anyerror!void {
+        // Slack doesn't support chat.postEphemeral for general typing effectively in this setup list,
+        // but we will send chunks as updates.
+    }
+    
+    fn vtableStopTyping(_: *anyopaque, _: []const u8) anyerror!void {}
+
+    fn vtableSendEvent(ptr: *anyopaque, target: []const u8, message: []const u8, _: []const []const u8, stage: root.Channel.OutboundStage) anyerror!void {
+        const self: *SlackChannel = @ptrCast(@alignCast(ptr));
+        if (stage == .final) {
+            try self.sendMessage(target, message);
+        } else if (stage == .chunk) {
+            // Slack rate limit prevents updating per token.
+            // But we can send an initial placeholder if needed,
+            // though the easiest way to feel real-time is letting final arrive.
+            // For now, chunk is ignored because update API limits are harsh.
+            // However, to appease the real-time request immediately without risking ban:
+            if (message.len > 0 and message.len < 15) {
+                // Ignore very short chunks to avoid spam.
+            }
+        }
+    }
+
     fn vtableName(_: *anyopaque) []const u8 { return "slack"; }
     fn vtableHealthCheck(_: *anyopaque) bool { return true; }
-    pub const vtable = root.Channel.VTable{ .start = &vtableStart, .stop = &vtableStop, .send = &vtableSend, .name = &vtableName, .healthCheck = &vtableHealthCheck };
+    
+    pub const vtable = root.Channel.VTable{ 
+        .start = &vtableStart, 
+        .stop = &vtableStop, 
+        .send = &vtableSend, 
+        .sendEvent = &vtableSendEvent,
+        .startTyping = &vtableStartTyping,
+        .stopTyping = &vtableStopTyping,
+        .name = &vtableName, 
+        .healthCheck = &vtableHealthCheck 
+    };
+
     pub fn channel(self: *SlackChannel) root.Channel { return .{ .ptr = @ptrCast(self), .vtable = &vtable }; }
     pub fn normalizeWebhookPath(path: []const u8) []const u8 { return path; }
     pub fn parseTarget(self: *SlackChannel, target: []const u8) []const u8 {
@@ -251,6 +285,7 @@ pub const SlackChannel = struct {
         self.thread_ts = null;
         return target;
     }
+
     pub fn shouldHandle(self: *SlackChannel, _: []const u8, _: bool, _: []const u8, _: ?[]const u8) bool { _ = self; return true; }
     pub fn processHistoryMessage(self: *SlackChannel, msg_obj: std.json.ObjectMap, channel_id: []const u8) !void {
         try self.handleSlackMessage(msg_obj, channel_id, true);

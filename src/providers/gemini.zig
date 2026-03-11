@@ -201,11 +201,17 @@ pub fn parseCredentialsJson(allocator: std.mem.Allocator, json_bytes: []const u8
         }
     } else null;
 
-    // expires_at is optional (unix timestamp)
+    // expires_at is optional (unix timestamp or milliseconds depending on format, gemini-cli uses expiry_date in ms)
     const expires_at: ?i64 = if (root_obj.get("expires_at")) |ea_val| blk: {
         switch (ea_val) {
             .integer => |i| break :blk i,
             .float => |f| break :blk @intFromFloat(f),
+            else => break :blk null,
+        }
+    } else if (root_obj.get("expiry_date")) |ed_val| blk: {
+        switch (ed_val) {
+            .integer => |i| break :blk @divFloor(i, 1000), // convert ms to seconds
+            .float => |f| break :blk @intFromFloat(f / 1000.0),
             else => break :blk null,
         }
     } else null;
