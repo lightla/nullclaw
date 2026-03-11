@@ -33,33 +33,53 @@ pub const GeminiCliProvider = struct {
     };
 
     fn chatImpl(ptr: *anyopaque, allocator: std.mem.Allocator, request: ChatRequest, model: []const u8, _: f64) anyerror!ChatResponse {
-        log.info("TIN NHẮN ĐÃ CHẠM VÀO PROVIDER! Agent: {s}", .{model});
         const self: *GeminiCliProvider = @ptrCast(@alignCast(ptr));
         const effective_model = if (model.len > 0) model else self.model;
+        
         var m_pure = effective_model;
         var agent_name: []const u8 = "assistant";
-        if (std.mem.indexOf(u8, effective_model, "--")) |idx| { m_pure = effective_model[0..idx]; agent_name = effective_model[idx + 2 ..]; }
+        
+        if (std.mem.indexOf(u8, effective_model, "--")) |idx| {
+            m_pure = effective_model[0..idx];
+            agent_name = effective_model[idx + 2 ..];
+        }
+        
+        if (std.mem.eql(u8, agent_name, "monitor")) return ChatResponse{ .content = "", .model = try allocator.dupe(u8, effective_model), .usage = .{} };
+
         const prompt = try constructFullAwarePrompt(allocator, request, agent_name);
         defer allocator.free(prompt);
-        const res = try runGeminiGreedy(allocator, prompt, m_pure, agent_name, null, null);
-                log.info("Gemini đã trả lời cho {s}: {s}", .{agent_name, res.content});
-return ChatResponse{ .content = res.content, .model = try allocator.dupe(u8, effective_model), .usage = res.usage };
+
+        log.info("call_gemini_cli[{s}][{s}]: {s}", .{agent_name, m_pure, if (prompt.len > 500) prompt[0..500] else prompt});
+
+        const res = try runGeminiFinal(allocator, prompt, m_pure, agent_name, null, null);
+        return ChatResponse{ .content = res.content, .model = try allocator.dupe(u8, effective_model), .usage = res.usage };
     }
 
     fn streamChatImpl(ptr: *anyopaque, allocator: std.mem.Allocator, request: ChatRequest, model: []const u8, _: f64, callback: StreamCallback, callback_ctx: *anyopaque) anyerror!StreamChatResult {
         const self: *GeminiCliProvider = @ptrCast(@alignCast(ptr));
         const effective_model = if (model.len > 0) model else self.model;
+        
         var m_pure = effective_model;
         var agent_name: []const u8 = "assistant";
-        if (std.mem.indexOf(u8, effective_model, "--")) |idx| { m_pure = effective_model[0..idx]; agent_name = effective_model[idx + 2 ..]; }
+        
+        if (std.mem.indexOf(u8, effective_model, "--")) |idx| {
+            m_pure = effective_model[0..idx];
+            agent_name = effective_model[idx + 2 ..];
+        }
+
+        if (std.mem.eql(u8, agent_name, "monitor")) return StreamChatResult{ .content = "", .usage = .{} };
+
         const prompt = try constructFullAwarePrompt(allocator, request, agent_name);
         defer allocator.free(prompt);
-        const res = try runGeminiGreedy(allocator, prompt, m_pure, agent_name, callback, callback_ctx);
+
+        log.info("call_gemini_cli[{s}][{s}]: {s}", .{agent_name, m_pure, if (prompt.len > 500) prompt[0..500] else prompt});
+
+        const res = try runGeminiFinal(allocator, prompt, m_pure, agent_name, callback, callback_ctx);
         callback(callback_ctx, .{ .delta = "", .is_final = true, .token_count = 0 });
         return StreamChatResult{ .content = res.content, .usage = res.usage };
     }
 
-    fn runGeminiGreedy(
+    fn runGeminiFinal(
         allocator: std.mem.Allocator,
         prompt: []const u8,
         model_name: []const u8,
@@ -67,7 +87,6 @@ return ChatResponse{ .content = res.content, .model = try allocator.dupe(u8, eff
         stream_cb: ?StreamCallback,
         cb_ctx: ?*anyopaque,
     ) !InternalResult {
-        log.info("Gọi Gemini cho {s}", .{agent_name});
         var argv = std.ArrayListUnmanaged([]const u8).empty;
         defer {
             for (argv.items) |arg| allocator.free(arg);
@@ -76,16 +95,21 @@ return ChatResponse{ .content = res.content, .model = try allocator.dupe(u8, eff
         try argv.append(allocator, try allocator.dupe(u8, "gemini"));
         try argv.append(allocator, try allocator.dupe(u8, "-m"));
         try argv.append(allocator, try allocator.dupe(u8, model_name));
-        try argv.append(allocator, try allocator.dupe(u8, "-p"));
-        try argv.append(allocator, try allocator.dupe(u8, prompt));
+        try argv.append(allocator, try allocator.dupe(u8, "--resume"));
+        try argv.append(allocator, try allocator.dupe(u8, agent_name));
         try argv.append(allocator, try allocator.dupe(u8, "--output-format"));
         try argv.append(allocator, try allocator.dupe(u8, "stream-json"));
         try argv.append(allocator, try allocator.dupe(u8, "--yolo"));
 
         var child = std.process.Child.init(argv.items, allocator);
+        child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Ignore;
         try child.spawn();
+
+        try child.stdin.?.writeAll(prompt);
+        child.stdin.?.close();
+        child.stdin = null;
 
         var full_content = std.ArrayListUnmanaged(u8).empty;
         errdefer full_content.deinit(allocator);
@@ -101,7 +125,10 @@ return ChatResponse{ .content = res.content, .model = try allocator.dupe(u8, eff
                 if (byte == '\n') {
                     const line = std.mem.trim(u8, line_buf.items, " \t\r\n");
                     if (line.len > 0 and std.mem.startsWith(u8, line, "{")) {
-                        const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch { line_buf.clearRetainingCapacity(); continue; };
+                        const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch {
+                            line_buf.clearRetainingCapacity();
+                            continue;
+                        };
                         defer parsed.deinit();
                         if (parsed.value == .object) {
                             const obj = parsed.value.object;
@@ -110,29 +137,39 @@ return ChatResponse{ .content = res.content, .model = try allocator.dupe(u8, eff
                                     if (obj.get("role")) |rv| {
                                         if (std.mem.eql(u8, rv.string, "assistant")) {
                                             if (obj.get("content")) |c| {
-                                                try full_content.appendSlice(allocator, c.string);
-                                                if (stream_cb) |cb| cb(cb_ctx.?, .{ .delta = c.string, .is_final = false, .token_count = 0 });
+                                                if (c == .string) {
+                                                    if (std.mem.indexOf(u8, c.string, "Reflect on") == null) {
+                                                        try full_content.appendSlice(allocator, c.string);
+                                                        if (stream_cb) |cb| cb(cb_ctx.?, .{ .delta = c.string, .is_final = false, .token_count = 0 });
+                                                    }
+                                                }
                                             }
                                         }
                                     }
                                 } else if (std.mem.eql(u8, t.string, "result")) {
                                     if (obj.get("stats")) |stats| {
-                                        if (stats.object.get("total_tokens")) |tt| { usage.total_tokens = @intCast(tt.integer); }
+                                        if (stats.object.get("total_tokens")) |tt| {
+                                            usage.total_tokens = @intCast(tt.integer);
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                     line_buf.clearRetainingCapacity();
-                } else try line_buf.append(allocator, byte);
+                } else {
+                    try line_buf.append(allocator, byte);
+                }
             }
         }
         _ = child.wait() catch {};
         return InternalResult{ .content = try full_content.toOwnedSlice(allocator), .usage = usage };
     }
 
-    fn chatWithSystemImpl(_: *anyopaque, allocator: std.mem.Allocator, _: ?[]const u8, message: []const u8, model: []const u8, _: f64) anyerror![]const u8 {
-        const res = try runGeminiGreedy(allocator, message, model, "system", null, null);
+    fn chatWithSystemImpl(_: *anyopaque, allocator: std.mem.Allocator, system_prompt: ?[]const u8, message: []const u8, model: []const u8, _: f64) anyerror![]const u8 {
+        const prompt = if (system_prompt) |s| try std.fmt.allocPrint(allocator, "{s}\n\n{s}", .{s, message}) else message;
+        defer if (system_prompt != null) allocator.free(prompt);
+        const res = try runGeminiFinal(allocator, prompt, model, "system", null, null);
         return res.content;
     }
     fn supportsNativeToolsImpl(_: *anyopaque) bool { return false; }
@@ -145,12 +182,19 @@ return ChatResponse{ .content = res.content, .model = try allocator.dupe(u8, eff
 fn constructFullAwarePrompt(allocator: std.mem.Allocator, request: ChatRequest, agent_name: []const u8) ![]const u8 {
     var full_prompt = std.ArrayListUnmanaged(u8).empty;
     errdefer full_prompt.deinit(allocator);
-    try std.fmt.format(full_prompt.writer(allocator), "Mày là {s} trên Slack. Trả lời yêu cầu sau:\\n\\n", .{agent_name});
+    
+    try std.fmt.format(full_prompt.writer(allocator), "CHỈ THỊ HỆ THỐNG: Mày là {s} trên Slack. Hãy trả lời câu hỏi cuối cùng của người dùng dựa trên lịch sử hội thoại dưới đây. Tuyệt đối không lặp lại lịch sử, không in rác hệ thống.\n\n[LỊCH SỬ HỘI THOẠI]\n", .{agent_name});
+    
     for (request.messages) |msg| {
-        const tag = if (msg.role == .user) "User: " else "Assistant: ";
-        try full_prompt.appendSlice(allocator, tag);
-        try full_prompt.appendSlice(allocator, msg.content);
-        try full_prompt.appendSlice(allocator, "\\n\\n");
+        const role = if (msg.role == .user) "Người dùng" else "Bạn";
+        try std.fmt.format(full_prompt.writer(allocator), "- {s}: {s}\n", .{role, msg.content});
     }
+    
+    try full_prompt.appendSlice(allocator, "\n[CÂU HỎI CUỐI CÙNG]: ");
+    if (request.messages.len > 0) {
+        try full_prompt.appendSlice(allocator, request.messages[request.messages.len-1].content);
+    }
+    
+    try full_prompt.appendSlice(allocator, "\n\nTRẢ LỜI NGAY: ");
     return full_prompt.toOwnedSlice(allocator);
 }

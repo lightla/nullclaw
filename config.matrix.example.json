@@ -226,6 +226,24 @@
     "typing_interval_secs": 5,
     "max_concurrent_tasks": 4
   },
+  "bindings": [
+    {
+      "agent_id": "dev",
+      "comment": "dev_bot Slack account → dev agent",
+      "match": {
+        "channel": "slack",
+        "account_id": "dev_bot"
+      }
+    },
+    {
+      "agent_id": "mentor",
+      "comment": "mentor_bot Slack account → mentor agent",
+      "match": {
+        "channel": "slack",
+        "account_id": "mentor_bot"
+      }
+    }
+  ],
   "models": {
     "providers": {}
   }

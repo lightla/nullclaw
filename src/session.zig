@@ -153,6 +153,33 @@ pub const SessionManager = struct {
             agent.usage_record_ctx = @ptrCast(self);
         }
 
+        // Override model + system_prompt based on agent_id parsed from session_key.
+        // Session key format: "agent:{agent_id}:..." — extract the second segment.
+        if (std.mem.startsWith(u8, session_key, "agent:")) {
+            const after_prefix = session_key["agent:".len..];
+            const colon_pos = std.mem.indexOfScalar(u8, after_prefix, ':');
+            const agent_id = if (colon_pos) |pos| after_prefix[0..pos] else after_prefix;
+            for (self.config.agents) |named| {
+                if (std.mem.eql(u8, named.name, agent_id)) {
+                    // Override model name (owned copy so Agent.deinit can free it)
+                    const model_copy = try self.allocator.dupe(u8, named.model);
+                    if (agent.model_name_owned) self.allocator.free(agent.model_name);
+                    agent.model_name = model_copy;
+                    agent.model_name_owned = true;
+                    agent.default_model = model_copy;
+                    // Inject system_prompt as the first history message if provided
+                    if (named.system_prompt) |sp| {
+                        try agent.history.append(self.allocator, .{
+                            .role = .system,
+                            .content = try self.allocator.dupe(u8, sp),
+                        });
+                        agent.has_system_prompt = true;
+                    }
+                    break;
+                }
+            }
+        }
+
         session.* = .{
             .agent = agent,
             .created_at = std.time.timestamp(),
