@@ -288,6 +288,8 @@ pub const SlackConfig = struct {
     dm_policy: []const u8 = "pairing",
     group_policy: []const u8 = "mention_only",
     reply_to_mode: SlackReplyToMode = .off,
+    bot_id: ?[]const u8 = null,
+    bot_name: ?[]const u8 = null,
 };
 
 pub const WebhookConfig = struct {

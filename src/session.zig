@@ -384,6 +384,43 @@ pub const SessionManager = struct {
         return self.processMessageStreaming(session_key, content, conversation_context, null);
     }
 
+    /// Record a message in history and persistent store WITHOUT calling the LLM.
+    /// Used for "listening" mode when an agent is not directly tagged.
+    pub fn recordMessage(
+        self: *SessionManager,
+        session_key: []const u8,
+        content: []const u8,
+        conversation_context: ?ConversationContext,
+    ) !void {
+        const session = try self.getOrCreate(session_key);
+        session.mutex.lock();
+        defer session.mutex.unlock();
+
+        // 1. Add to in-memory history (for immediate context in next turn)
+        try session.agent.recordUserMessage(content);
+        
+        // 2. Persist to SQLite
+        if (self.session_store) |store| {
+            const message_id = if (conversation_context) |ctx| ctx.message_id else null;
+            store.saveMessage(session_key, "user", content, message_id) catch {};
+        }
+
+        // 3. Auto-save to memory if enabled
+        if (session.agent.auto_save) {
+            if (session.agent.mem) |mem| {
+                const ts: u128 = @bitCast(std.time.nanoTimestamp());
+                const save_key = try std.fmt.allocPrint(self.allocator, "autosave_listen_{d}", .{ts});
+                defer self.allocator.free(save_key);
+                _ = mem.store(save_key, content, .conversation, session.agent.memory_session_id) catch {};
+                if (session.agent.mem_rt) |rt| {
+                    rt.syncVectorAfterStore(self.allocator, save_key, content);
+                }
+            }
+        }
+        
+        session.last_active = std.time.timestamp();
+    }
+
     /// Process a message within a session context and optionally forward text deltas.
     /// Deltas are only emitted when provider streaming is active.
     pub fn processMessageStreaming(
@@ -463,8 +500,9 @@ pub const SessionManager = struct {
                 store.clearAutoSaved(session_key) catch {};
             } else if (!std.mem.startsWith(u8, trimmed, "/")) {
                 // Persist user + assistant messages (skip slash commands)
-                store.saveMessage(session_key, "user", content) catch {};
-                store.saveMessage(session_key, "assistant", response) catch {};
+                const message_id = if (conversation_context) |ctx| ctx.message_id else null;
+                store.saveMessage(session_key, "user", content, message_id) catch {};
+                store.saveMessage(session_key, "assistant", response, null) catch {};
             }
         }
 

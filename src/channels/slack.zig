@@ -19,6 +19,7 @@ pub const SlackChannel = struct {
     bus: ?*bus_mod.Bus = null,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     bot_user_id: ?[]u8 = null,
+    bot_name: ?[]u8 = null,
     thread_ts: ?[]const u8 = null,
     socket_thread: ?std.Thread = null,
     discovered_channels: std.StringHashMapUnmanaged([]u8) = .empty,
@@ -38,7 +39,7 @@ pub const SlackChannel = struct {
             .account_id = cfg.account_id,
             .reply_to_mode = cfg.reply_to_mode,
             .policy = .{ .group = .open, .allowlist = cfg.allow_from },
-            .startup_ts = @as(f64, @floatFromInt(std.time.timestamp())),
+            // startup_ts will be set in vtableStart
         };
     }
 
@@ -57,7 +58,13 @@ pub const SlackChannel = struct {
         if (parsed.value.object.get("user_id")) |uid| {
             if (self.bot_user_id) |old| self.allocator.free(old);
             self.bot_user_id = try self.allocator.dupe(u8, uid.string);
-            log.info("[{s}] Bot Identity xác lập: {s}", .{self.account_id, self.bot_user_id.?});
+        }
+        if (parsed.value.object.get("user")) |un| {
+            if (self.bot_name) |old| self.allocator.free(old);
+            self.bot_name = try self.allocator.dupe(u8, un.string);
+        }
+        if (self.bot_user_id) |bid| {
+            log.info("[{s}] Bot Identity: ID={s}, Name={s}", .{self.account_id, bid, self.bot_name orelse "unknown"});
         }
     }
 
@@ -86,11 +93,10 @@ pub const SlackChannel = struct {
     }
 
     fn handleSlackMessage(self: *SlackChannel, msg_obj: std.json.ObjectMap, channel_id: []const u8, is_live: bool) !void {
-        // CHỐNG LOOP TUYỆT ĐỐI (Version 3.0)
-        if (msg_obj.get("bot_id") != null or msg_obj.get("app_id") != null) return;
+        const is_bot = msg_obj.get("bot_id") != null or msg_obj.get("app_id") != null;
         const sender_id = if (msg_obj.get("user")) |u| u.string else "unknown";
         
-        // Nếu người gửi chính là ID của bot này hoặc tài khoản bot kia -> BỎ QUA
+        // Nếu người gửi chính là ID của bot này -> BỎ QUA TUYỆT ĐỐI
         if (self.bot_user_id) |bid| if (std.mem.eql(u8, sender_id, bid)) return;
 
         const text_val = msg_obj.get("text") orelse return;
@@ -107,26 +113,80 @@ pub const SlackChannel = struct {
         defer self.allocator.free(my_session_key);
 
         if (effective_is_live) {
-            const is_dev_tag = std.mem.indexOf(u8, text, "/dev") != null;
-            const is_mentor_tag = std.mem.indexOf(u8, text, "/mentor") != null;
-
-            if (std.mem.eql(u8, self.account_id, "dev_bot") and is_dev_tag) {
-                log.info("[dev_bot] PHẢN HỒI >> {s}", .{text});
-                try self.dispatchToAgent(text, "dev", sender_id, channel_id, my_session_key, msg_obj);
-            } else if (std.mem.eql(u8, self.account_id, "mentor_bot") and is_mentor_tag) {
-                log.info("[mentor_bot] PHẢN HỒI >> {s}", .{text});
-                try self.dispatchToAgent(text, "mentor", sender_id, channel_id, my_session_key, msg_obj);
-            } else if ((std.mem.eql(u8, self.account_id, "dev_bot") and is_mentor_tag) or
-                (std.mem.eql(u8, self.account_id, "mentor_bot") and is_dev_tag))
-            {
-                // Message is tagged for the OTHER bot — skip to avoid cross-dispatch
-            } else {
-                // Untagged message — record only
-                const inbound = try bus_mod.makeInboundFull(self.allocator, "slack", sender_id, channel_id, text, my_session_key, &.{}, null);
-                if (self.bus) |b| b.publishInbound(inbound) catch {};
+            // 1. Kiểm tra Mention trực tiếp bằng ID (Slack gửi dạng <@U123...>)
+            var is_self_mentioned = false;
+            if (self.bot_user_id) |bid| {
+                var ment_buf: [40]u8 = undefined;
+                const mention_tag = std.fmt.bufPrint(&ment_buf, "<@{s}>", .{bid}) catch "";
+                if (std.mem.indexOf(u8, text, mention_tag) != null) {
+                    is_self_mentioned = true;
+                }
             }
+            
+            // 2. Kiểm tra Alias dựa trên account_id (ví dụ: "dev_bot" -> "dev")
+            const base_name = if (std.mem.indexOf(u8, self.account_id, "_bot")) |idx| self.account_id[0..idx] else self.account_id;
+            
+            var name_matched = false;
+            {
+                // Tìm kiếm case-insensitive cho /alias và @alias
+                var i: usize = 0;
+                while (i < text.len) : (i += 1) {
+                    if (text[i] == '/' or text[i] == '@') {
+                        if (i + base_name.len < text.len) {
+                            if (std.ascii.eqlIgnoreCase(text[i + 1 .. i + 1 + base_name.len], base_name)) {
+                                name_matched = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // 3. Nếu có bot_name thực tế từ Slack, kiểm tra thêm (case-insensitive)
+            if (!name_matched and self.bot_name != null) {
+                const bn = self.bot_name.?;
+                var i: usize = 0;
+                while (i < text.len) : (i += 1) {
+                    if (text[i] == '@' and i + bn.len < text.len) {
+                        if (std.ascii.eqlIgnoreCase(text[i + 1 .. i + 1 + bn.len], bn)) {
+                            name_matched = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            var should_respond = false;
+            if (is_bot) {
+                // CHIẾU CUỐI CHO BOT: Chỉ phản hồi nếu được tag bằng ID (<@U...>)
+                // Điều này ngăn chặn việc 2 bot nhắc tên nhau trong văn bản (ví dụ "Chào dev") tạo thành loop vô tận.
+                should_respond = is_self_mentioned;
+            } else {
+                // ĐẶC CÁCH CHO NGƯỜI DÙNG: Chấp nhận cả tag ID và alias (/dev, @dev, @BotName)
+                should_respond = is_self_mentioned or name_matched;
+            }
+
+            if (should_respond) {
+                log.info("[{s}] PHẢN HỒI >> {s} (ts={s})", .{self.account_id, text, ts_str});
+                try self.dispatchToAgent(text, base_name, sender_id, channel_id, my_session_key, msg_obj);
+                return;
+            }
+
+            // Tin nhắn không tag hoặc tag cho bot khác -> Chỉ ghi nhận (Record Only) để làm bối cảnh sau này
+            var metadata = std.ArrayListUnmanaged(u8).empty;
+            defer metadata.deinit(self.allocator);
+            try metadata.writer(self.allocator).print("{{\"account_id\":\"{s}\",\"ts\":\"{s}\",\"record_only\":true}}", .{ self.account_id, ts_str });
+
+            const inbound = try bus_mod.makeInboundFull(self.allocator, "slack", sender_id, channel_id, text, my_session_key, &.{}, metadata.items);
+            if (self.bus) |b| b.publishInbound(inbound) catch {};
         } else {
-            const inbound = try bus_mod.makeInboundFull(self.allocator, "slack", sender_id, channel_id, text, my_session_key, &.{}, null);
+            // Tin nhắn cũ (Historical) -> Chỉ ghi nhận (Record Only)
+            log.debug("[{s}] Bỏ qua phản hồi tin nhắn cũ (ts={s} < startup={d})", .{self.account_id, ts_str, self.startup_ts});
+            var metadata = std.ArrayListUnmanaged(u8).empty;
+            defer metadata.deinit(self.allocator);
+            try metadata.writer(self.allocator).print("{{\"account_id\":\"{s}\",\"ts\":\"{s}\",\"record_only\":true}}", .{ self.account_id, ts_str });
+
+            const inbound = try bus_mod.makeInboundFull(self.allocator, "slack", sender_id, channel_id, text, my_session_key, &.{}, metadata.items);
             if (self.bus) |b| b.publishInbound(inbound) catch {};
         }
     }
@@ -147,7 +207,10 @@ pub const SlackChannel = struct {
 
         var metadata = std.ArrayListUnmanaged(u8).empty;
         defer metadata.deinit(self.allocator);
-        try metadata.writer(self.allocator).print("{{\"account_id\":\"{s}\",\"ts\":\"{s}\"}}", .{ self.account_id, message_ts });
+        try metadata.writer(self.allocator).print(
+            "{{\"account_id\":\"{s}\",\"ts\":\"{s}\",\"bot_id\":\"{s}\",\"bot_name\":\"{s}\"}}",
+            .{ self.account_id, message_ts, self.bot_user_id orelse "", self.bot_name orelse "" },
+        );
 
         const tagged_text = try std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ agent_name, raw_text });
         defer self.allocator.free(tagged_text);
@@ -224,6 +287,7 @@ pub const SlackChannel = struct {
     fn vtableStart(ptr: *anyopaque) anyerror!void { 
         const self: *SlackChannel = @ptrCast(@alignCast(ptr));
         self.running.store(true, .release);
+        self.startup_ts = @as(f64, @floatFromInt(std.time.timestamp())); // Đánh dấu thời điểm GATEWAY START thực tế
         try self.fetchBotUserId();
         try self.discoverMyChannels();
         self.socket_thread = try std.Thread.spawn(.{}, socketLoop, .{self});

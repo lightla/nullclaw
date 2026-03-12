@@ -963,6 +963,20 @@ pub const Agent = struct {
         return result.toOwnedSlice(arena);
     }
 
+    /// Record a user message into history, optionally enriching it with memory.
+    pub fn recordUserMessage(self: *Agent, content: []const u8) !void {
+        const enriched = if (self.mem) |mem|
+            try memory_loader.enrichMessageWithRuntime(self.allocator, mem, self.mem_rt, content, self.memory_session_id)
+        else
+            try self.allocator.dupe(u8, content);
+        errdefer self.allocator.free(enriched);
+
+        try self.history.append(self.allocator, .{
+            .role = .user,
+            .content = enriched,
+        });
+    }
+
     /// Execute a single conversation turn: send messages to LLM, parse tool calls,
     /// execute tools, and loop until a final text response is produced.
     pub fn turn(self: *Agent, user_message: []const u8) ![]const u8 {
@@ -1067,18 +1081,8 @@ pub const Agent = struct {
             }
         }
 
-        // Enrich message with memory context (always returns owned slice; ownership → history)
-        // Uses retrieval pipeline (hybrid search, RRF, temporal decay, MMR) when MemoryRuntime is available.
-        const enriched = if (self.mem) |mem|
-            try memory_loader.enrichMessageWithRuntime(self.allocator, mem, self.mem_rt, effective_user_message, self.memory_session_id)
-        else
-            try self.allocator.dupe(u8, effective_user_message);
-        errdefer self.allocator.free(enriched);
-
-        try self.history.append(self.allocator, .{
-            .role = .user,
-            .content = enriched,
-        });
+        // Enrich and record user message in history
+        try self.recordUserMessage(effective_user_message);
 
         // ── Response cache check ──
         if (self.response_cache) |rc| {

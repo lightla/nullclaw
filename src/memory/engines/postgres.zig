@@ -609,7 +609,8 @@ const PostgresMemoryImpl = struct {
 
     // ── SessionStore vtable implementation ────────────────────────
 
-    fn implSessionSaveMessage(ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8) anyerror!void {
+    fn implSessionSaveMessage(ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8, message_id: ?[]const u8) anyerror!void {
+        _ = message_id;
         const self_: *Self = @ptrCast(@alignCast(ptr));
 
         const sid_z = try self_.allocator.dupeZ(u8, session_id);

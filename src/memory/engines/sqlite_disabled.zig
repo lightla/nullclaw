@@ -194,7 +194,7 @@ pub const SqliteMemory = struct {
         };
     }
 
-    pub fn saveMessage(_: *Self, _: []const u8, _: []const u8, _: []const u8) !void {
+    pub fn saveMessage(_: *Self, _: []const u8, _: []const u8, _: []const u8, _: ?[]const u8) !void {
         return error.SqliteDisabled;
     }
 
@@ -210,9 +210,9 @@ pub const SqliteMemory = struct {
         return error.SqliteDisabled;
     }
 
-    fn implSessionSaveMessage(ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8) anyerror!void {
+    fn implSessionSaveMessage(ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8, message_id: ?[]const u8) anyerror!void {
         const self_: *Self = @ptrCast(@alignCast(ptr));
-        return self_.saveMessage(session_id, role, content);
+        return self_.saveMessage(session_id, role, content, message_id);
     }
 
     fn implSessionLoadMessages(ptr: *anyopaque, allocator: std.mem.Allocator, session_id: []const u8) anyerror![]root.MessageEntry {

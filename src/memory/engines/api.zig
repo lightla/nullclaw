@@ -664,7 +664,8 @@ pub const ApiMemory = struct {
 
     // ── SessionStore vtable implementation ───────────────────────
 
-    fn implSaveMessage(ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8) anyerror!void {
+    fn implSaveMessage(ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8, message_id: ?[]const u8) anyerror!void {
+        _ = message_id;
         const self: *Self = @ptrCast(@alignCast(ptr));
         const alloc = self.allocator;
 

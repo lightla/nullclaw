@@ -29,6 +29,7 @@ const security = @import("security/policy.zig");
 const PairingGuard = @import("security/pairing.zig").PairingGuard;
 const channels = @import("channels/root.zig");
 const bus_mod = @import("bus.zig");
+const ConversationContext = @import("agent/prompt.zig").ConversationContext;
 
 /// Maximum request body size (64KB) — prevents memory exhaustion.
 pub const MAX_BODY_SIZE: usize = 65_536;
@@ -2135,24 +2136,60 @@ fn handleSlackWebhookRoute(ctx: *WebhookHandlerContext) void {
         ctx.config_opt,
     );
 
+    const msg_ts = if (event_obj.get("ts")) |v| if (v == .string) v.string else null else null;
+
     if (ctx.state.event_bus) |eb| {
         var meta_buf: [384]u8 = undefined;
         const peer_kind = if (is_dm) "direct" else "channel";
         const peer_id = if (is_dm) sender_id else channel_id;
         const metadata = std.fmt.bufPrint(
             &meta_buf,
-            "{{\"account_id\":\"{s}\",\"is_dm\":{s},\"channel_id\":\"{s}\",\"peer_kind\":\"{s}\",\"peer_id\":\"{s}\"}}",
+            "{{\"account_id\":\"{s}\",\"is_dm\":{s},\"channel_id\":\"{s}\",\"peer_kind\":\"{s}\",\"peer_id\":\"{s}\",\"message_id\":\"{s}\"}}",
             .{
                 slack_cfg.account_id,
                 if (is_dm) "true" else "false",
                 channel_id,
                 peer_kind,
                 peer_id,
+                msg_ts orelse "",
             },
         ) catch null;
         _ = publishToBus(eb, ctx.state.allocator, "slack", sender_id, channel_id, text, sk, metadata);
     } else if (ctx.session_mgr_opt) |sm| {
-        const reply: ?[]const u8 = sm.processMessage(sk, text, null) catch |err| blk: {
+        var participants: ?[]const []const u8 = null;
+        var participants_owned = false;
+        if (ctx.config_opt) |cfg| {
+            var parts: std.ArrayListUnmanaged([]const u8) = .empty;
+            for (cfg.channels.slack) |acc| {
+                if (acc.bot_id) |bid| {
+                    if (slack_cfg.bot_id) |my_id| if (std.mem.eql(u8, bid, my_id)) continue;
+                    const bn = acc.bot_name orelse "Bot";
+                    const p = std.fmt.allocPrint(ctx.req_allocator, "{s}: <@{s}>", .{ bn, bid }) catch continue;
+                    parts.append(ctx.req_allocator, p) catch ctx.req_allocator.free(p);
+                }
+            }
+            if (parts.items.len > 0) {
+                participants = parts.toOwnedSlice(ctx.req_allocator) catch null;
+                participants_owned = true;
+            } else {
+                parts.deinit(ctx.req_allocator);
+            }
+        }
+        defer if (participants_owned) {
+            if (participants) |ps| {
+                for (ps) |p| ctx.req_allocator.free(p);
+                ctx.req_allocator.free(ps);
+            }
+        };
+
+        const conv_ctx = ConversationContext{
+            .channel = "slack",
+            .message_id = msg_ts,
+            .bot_id = slack_cfg.bot_id,
+            .bot_name = slack_cfg.bot_name,
+            .participants = participants,
+        };
+        const reply: ?[]const u8 = sm.processMessage(sk, text, conv_ctx) catch |err| blk: {
             var outbound_ch = channels.slack.SlackChannel.initFromConfig(ctx.req_allocator, slack_cfg.*);
             outbound_ch.sendMessage(channel_id, userFacingAgentError(err)) catch {};
             break :blk null;

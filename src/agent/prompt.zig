@@ -112,6 +112,10 @@ pub const ConversationContext = struct {
     sender_uuid: ?[]const u8 = null,
     group_id: ?[]const u8 = null,
     is_group: ?bool = null,
+    message_id: ?[]const u8 = null,
+    bot_id: ?[]const u8 = null,
+    bot_name: ?[]const u8 = null,
+    participants: ?[]const []const u8 = null, // Format: "Name: <@ID>"
 };
 
 /// Context passed to prompt sections during construction.
@@ -225,6 +229,18 @@ pub fn buildSystemPrompt(
         }
         if (cc.sender_uuid) |uuid| {
             try std.fmt.format(w, "- Sender UUID: {s}\n", .{uuid});
+        }
+        if (cc.bot_id) |bid| {
+            try std.fmt.format(w, "- Your ID: <@{s}>\n", .{bid});
+        }
+        if (cc.bot_name) |bn| {
+            try std.fmt.format(w, "- Your Name: {s}\n", .{bn});
+        }
+        if (cc.participants) |parts| {
+            try w.writeAll("- Other Participants in Channel:\n");
+            for (parts) |p| {
+                try std.fmt.format(w, "  * {s}\n", .{p});
+            }
         }
         try w.writeAll("\n");
     }

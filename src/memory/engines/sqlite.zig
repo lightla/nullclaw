@@ -230,6 +230,7 @@ pub const SqliteMemory = struct {
         try self_.configurePragmas(use_wal);
         try self_.migrate();
         try self_.migrateSessionId();
+        try self_.migrateMessageId();
         return self_;
     }
 
@@ -318,11 +319,13 @@ pub const SqliteMemory = struct {
             \\
             \\-- Legacy tables for backward compat
             \\CREATE TABLE IF NOT EXISTS messages (
-            \\  id INTEGER PRIMARY KEY AUTOINCREMENT,
+            \\  id         INTEGER PRIMARY KEY AUTOINCREMENT,
             \\  session_id TEXT NOT NULL,
-            \\  role TEXT NOT NULL,
-            \\  content TEXT NOT NULL,
-            \\  created_at TEXT DEFAULT (datetime('now'))
+            \\  message_id TEXT,
+            \\  role       TEXT NOT NULL,
+            \\  content    TEXT NOT NULL,
+            \\  created_at TEXT DEFAULT (datetime('now')),
+            \\  UNIQUE(session_id, message_id)
             \\);
             \\CREATE TABLE IF NOT EXISTS sessions (
             \\  id TEXT PRIMARY KEY,
@@ -395,6 +398,40 @@ pub const SqliteMemory = struct {
         if (rc2 != c.SQLITE_OK) {
             self.logExecFailure("session_id migration", "CREATE INDEX IF NOT EXISTS idx_memories_session", rc2, err_msg2);
             if (err_msg2) |msg| c.sqlite3_free(msg);
+        }
+    }
+
+    /// Migration: add message_id column to messages table and a unique index.
+    pub fn migrateMessageId(self: *Self) !void {
+        var err_msg: [*c]u8 = null;
+        // 1. Add column
+        _ = c.sqlite3_exec(
+            self.db,
+            "ALTER TABLE messages ADD COLUMN message_id TEXT;",
+            null,
+            null,
+            &err_msg,
+        );
+        if (err_msg) |msg| {
+            const msg_text = std.mem.span(msg);
+            if (std.mem.indexOf(u8, msg_text, "duplicate column name") == null) {
+                log.debug("message_id column migration: {s}", .{msg_text});
+            }
+            c.sqlite3_free(msg);
+        }
+
+        // 2. Create unique index
+        var err_msg2: [*c]u8 = null;
+        _ = c.sqlite3_exec(
+            self.db,
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_unique_msg ON messages(session_id, message_id);",
+            null,
+            null,
+            &err_msg2,
+        );
+        if (err_msg2) |msg| {
+            log.warn("message_id index migration failed: {s}", .{std.mem.span(msg)});
+            c.sqlite3_free(msg);
         }
     }
 
@@ -604,8 +641,12 @@ pub const SqliteMemory = struct {
 
     // ── Legacy helpers ─────────────────────────────────────────────
 
-    pub fn saveMessage(self: *Self, session_id: []const u8, role_str: []const u8, content: []const u8) !void {
-        const sql = "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)";
+    pub fn saveMessage(self: *Self, session_id: []const u8, role_str: []const u8, content: []const u8, message_id: ?[]const u8) !void {
+        const sql = if (message_id != null)
+            "INSERT OR IGNORE INTO messages (session_id, role, content, message_id) VALUES (?, ?, ?, ?)"
+        else
+            "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)";
+
         var stmt: ?*c.sqlite3_stmt = null;
         const rc = c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null);
         if (rc != c.SQLITE_OK) return error.PrepareFailed;
@@ -614,8 +655,12 @@ pub const SqliteMemory = struct {
         _ = c.sqlite3_bind_text(stmt, 1, session_id.ptr, @intCast(session_id.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_text(stmt, 2, role_str.ptr, @intCast(role_str.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_text(stmt, 3, content.ptr, @intCast(content.len), SQLITE_STATIC);
+        if (message_id) |mid| {
+            _ = c.sqlite3_bind_text(stmt, 4, mid.ptr, @intCast(mid.len), SQLITE_STATIC);
+        }
 
-        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.StepFailed;
+        const step_rc = c.sqlite3_step(stmt);
+        if (step_rc != c.SQLITE_DONE and step_rc != c.SQLITE_OK) return error.StepFailed;
     }
 
     /// A single persisted message entry (role + content).
@@ -692,9 +737,9 @@ pub const SqliteMemory = struct {
 
     // ── SessionStore vtable ────────────────────────────────────────
 
-    fn implSessionSaveMessage(ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8) anyerror!void {
+    fn implSessionSaveMessage(ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8, message_id: ?[]const u8) anyerror!void {
         const self_: *Self = @ptrCast(@alignCast(ptr));
-        return self_.saveMessage(session_id, role, content);
+        return self_.saveMessage(session_id, role, content, message_id);
     }
 
     fn implSessionLoadMessages(ptr: *anyopaque, allocator: std.mem.Allocator, session_id: []const u8) anyerror![]root.MessageEntry {

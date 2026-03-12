@@ -24,6 +24,7 @@ const bootstrap_mod = @import("bootstrap/root.zig");
 const onboard = @import("onboard.zig");
 const streaming = @import("streaming.zig");
 const thread_stacks = @import("thread_stacks.zig");
+const ConversationContext = @import("agent/prompt.zig").ConversationContext;
 
 const log = std.log.scoped(.daemon);
 
@@ -508,6 +509,24 @@ fn parseInboundMetadata(allocator: std.mem.Allocator, metadata_json: ?[]const u8
         if (pm.value.object.get("is_group")) |v| {
             if (v == .bool) parsed.fields.is_group = v.bool;
         }
+        if (pm.value.object.get("record_only")) |v| {
+            if (v == .bool) parsed.fields.record_only = v.bool;
+        }
+        if (pm.value.object.get("bot_id")) |v| {
+            if (v == .string) parsed.fields.bot_id = v.string;
+        }
+        if (pm.value.object.get("bot_name")) |v| {
+            if (v == .string) parsed.fields.bot_name = v.string;
+        }
+        if (pm.value.object.get("participants")) |v| {
+            if (v == .array) {
+                var parts: std.ArrayListUnmanaged([]const u8) = .empty;
+                for (v.array.items) |item| {
+                    if (item == .string) parts.append(allocator, item.string) catch {};
+                }
+                parsed.fields.participants = parts.toOwnedSlice(allocator) catch null;
+            }
+        }
     }
     return parsed;
 }
@@ -733,10 +752,60 @@ fn inboundDispatcherThread(
             }
         }
 
+        var participants: ?[]const []const u8 = parsed_meta.fields.participants;
+        var participants_owned = false;
+        if (participants == null and std.mem.eql(u8, msg.channel, "slack")) {
+            // Tự động thu thập danh sách các Bot khác từ cấu hình global
+            var parts: std.ArrayListUnmanaged([]const u8) = .empty;
+            const slack_accounts = runtime.config.channels.slack;
+            for (slack_accounts) |acc| {
+                if (acc.bot_id) |bid| {
+                    const bn = acc.bot_name orelse "Unknown Bot";
+                    // Không tự điền chính mình vào danh sách "Other" Participants để tránh rối
+                    if (parsed_meta.fields.bot_id) |my_id| {
+                        if (std.mem.eql(u8, my_id, bid)) continue;
+                    }
+                    const p = std.fmt.allocPrint(allocator, "{s}: <@{s}>", .{ bn, bid }) catch continue;
+                    parts.append(allocator, p) catch allocator.free(p);
+                }
+            }
+            if (parts.items.len > 0) {
+                participants = parts.toOwnedSlice(allocator) catch null;
+                participants_owned = true;
+            } else {
+                parts.deinit(allocator);
+            }
+        }
+        defer if (participants_owned) {
+            if (participants) |ps| {
+                for (ps) |p| allocator.free(p);
+                allocator.free(ps);
+            }
+        };
+
+        const conv_ctx = ConversationContext{
+            .channel = msg.channel,
+            .message_id = parsed_meta.fields.message_id,
+            .bot_id = parsed_meta.fields.bot_id,
+            .bot_name = parsed_meta.fields.bot_name,
+            .participants = participants,
+        };
+
+        if (parsed_meta.fields.record_only) {
+            _ = runtime.session_mgr.recordMessage(
+                session_key,
+                msg.content,
+                conv_ctx,
+            ) catch |err| {
+                log.warn("inbound record-only failed: {}", .{err});
+            };
+            continue;
+        }
+
         const reply = runtime.session_mgr.processMessageStreaming(
             session_key,
             msg.content,
-            null,
+            conv_ctx,
             stream_sink,
         ) catch |err| {
             log.warn("inbound dispatch process failed: {}", .{err});

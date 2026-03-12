@@ -100,5 +100,7 @@ Cần phải đọc kỹ `src/daemon.zig` đoạn `resolveInboundRouteSessionKey
 - **An toàn 100% Legit:** Gửi request chuẩn REST bằng giao thức OAuth2 qua cổng Developer API chính thức, không scrape web, không giả dạng Chrome, Google coi request này là hợp lệ hoàn toàn và chỉ áp dụng Rate Limit (lỗi 429) thay vì khóa account.
 
 ### COMMAND FOR ME (NOT FOR AI)
-zig build -Doptimize=ReleaseSmall 
+zig build -Doptimize=ReleaseSmall ll
 nullclaw gateway
+
+killall nullclaw

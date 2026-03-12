@@ -495,9 +495,9 @@ pub const LucidMemory = struct {
 
     // ── SessionStore vtable ────────────────────────────────────────
 
-    fn implSessionSaveMessage(ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8) anyerror!void {
+    fn implSessionSaveMessage(ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8, message_id: ?[]const u8) anyerror!void {
         const self = castSelf(ptr);
-        return self.local.saveMessage(session_id, role, content);
+        return self.local.saveMessage(session_id, role, content, message_id);
     }
 
     fn implSessionLoadMessages(ptr: *anyopaque, allocator: std.mem.Allocator, session_id: []const u8) anyerror![]root.MessageEntry {

@@ -159,14 +159,14 @@ pub const SessionStore = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        saveMessage: *const fn (ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8) anyerror!void,
+        saveMessage: *const fn (ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8, message_id: ?[]const u8) anyerror!void,
         loadMessages: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, session_id: []const u8) anyerror![]MessageEntry,
         clearMessages: *const fn (ptr: *anyopaque, session_id: []const u8) anyerror!void,
         clearAutoSaved: *const fn (ptr: *anyopaque, session_id: ?[]const u8) anyerror!void,
     };
 
-    pub fn saveMessage(self: SessionStore, session_id: []const u8, role: []const u8, content: []const u8) !void {
-        return self.vtable.saveMessage(self.ptr, session_id, role, content);
+    pub fn saveMessage(self: SessionStore, session_id: []const u8, role: []const u8, content: []const u8, message_id: ?[]const u8) !void {
+        return self.vtable.saveMessage(self.ptr, session_id, role, content, message_id);
     }
 
     pub fn loadMessages(self: SessionStore, allocator: std.mem.Allocator, session_id: []const u8) ![]MessageEntry {
