@@ -42,7 +42,7 @@ const CHANNEL_SUBCOMMANDS = "list|start|status|add|remove";
 const SKILLS_SUBCOMMANDS = "list|install|remove|info";
 const HARDWARE_SUBCOMMANDS = "scan|flash|monitor";
 const MEMORY_SUBCOMMANDS = "stats|count|reindex|search|get|list|drain-outbox|forget";
-const WORKSPACE_SUBCOMMANDS = "edit|reset-md";
+const WORKSPACE_SUBCOMMANDS = "edit|reset-md|append";
 const MODELS_SUBCOMMANDS = "list|info|benchmark|refresh";
 const AUTH_SUBCOMMANDS = "login|status|logout";
 
@@ -815,6 +815,11 @@ fn printWorkspaceUsage() void {
         \\      For file-based backends (markdown, hybrid) edits the file directly.
         \\      For DB-backed backends, use the agent's memory_store tool instead.
         \\
+        \\  append [path]
+        \\      Add a directory to the autonomy.allowed_paths list in config.json.
+        \\      This allows a single gateway instance to manage multiple projects.
+        \\      If [path] is omitted, use the current working directory.
+        \\
         \\  reset-md [--dry-run] [--include-bootstrap] [--clear-memory-md]
         \\      Reset prompt markdown files (AGENTS/SOUL/TOOLS/IDENTITY/USER/HEARTBEAT)
         \\      to bundled defaults.
@@ -1102,6 +1107,11 @@ fn runWorkspace(allocator: std.mem.Allocator, sub_args: []const []const u8) !voi
         return;
     }
 
+    if (std.mem.eql(u8, subcmd, "append")) {
+        try runWorkspaceAppend(allocator, sub_args[1..], &cfg);
+        return;
+    }
+
     if (!std.mem.eql(u8, subcmd, "reset-md")) {
         std.debug.print("Unknown workspace command: {s}\n\n", .{subcmd});
         printWorkspaceUsage();
@@ -1151,6 +1161,46 @@ fn runWorkspace(allocator: std.mem.Allocator, sub_args: []const []const u8) !voi
             .{ report.rewritten_files, report.removed_files },
         );
     }
+}
+
+fn runWorkspaceAppend(allocator: std.mem.Allocator, args: []const []const u8, cfg: *yc.config.Config) !void {
+    const raw_path = if (args.len > 0) args[0] else ".";
+
+    const abs_path = if (std.fs.path.isAbsolute(raw_path))
+        try allocator.dupe(u8, raw_path)
+    else
+        try std.fs.cwd().realpathAlloc(allocator, raw_path);
+    defer allocator.free(abs_path);
+
+    // Normalize path (strip trailing slash if not root)
+    var final_path = abs_path;
+    if (final_path.len > 1 and final_path[final_path.len - 1] == std.fs.path.sep) {
+        final_path = final_path[0 .. final_path.len - 1];
+    }
+
+    // Check if duplicate
+    for (cfg.autonomy.allowed_paths) |ap| {
+        if (std.mem.eql(u8, ap, final_path)) {
+            std.debug.print("Path already in allowed_paths: {s}\n", .{final_path});
+            return;
+        }
+    }
+
+    // Allocate new slice for allowed_paths
+    const new_paths = try cfg.allocator.alloc([]const u8, cfg.autonomy.allowed_paths.len + 1);
+    for (cfg.autonomy.allowed_paths, 0..) |ap, i| {
+        new_paths[i] = try cfg.allocator.dupe(u8, ap);
+    }
+    new_paths[cfg.autonomy.allowed_paths.len] = try cfg.allocator.dupe(u8, final_path);
+
+    // Update config
+    cfg.autonomy.allowed_paths = new_paths;
+
+    // Save
+    try cfg.save();
+
+    std.debug.print("Added workspace path to allowed_paths: {s}\n", .{final_path});
+    std.debug.print("Note: If the gateway is already running, please restart it to apply changes.\n", .{});
 }
 
 fn runWorkspaceEdit(allocator: std.mem.Allocator, args: []const []const u8, cfg: yc.config.Config) void {
