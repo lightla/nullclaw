@@ -279,6 +279,47 @@ pub const Config = struct {
         return cfg;
     }
 
+    /// Reload only the allowed_paths from config.json without a full restart.
+    /// This is used for 'hot' workspace updates.
+    pub fn refreshAllowedPaths(self: *Config) !void {
+        const file = std.fs.openFileAbsolute(self.config_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return err,
+        };
+        defer file.close();
+
+        const content = try file.readToEndAlloc(self.allocator, 1024 * 64);
+        defer self.allocator.free(content);
+
+        // We use a temporary arena to parse just what we need
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        const parsed = std.json.parseFromSlice(std.json.Value, a, content, .{}) catch return;
+        const root = parsed.value;
+        if (root != .object) return;
+
+        const autonomy = root.object.get("autonomy") orelse return;
+        if (autonomy != .object) return;
+
+        const paths_val = autonomy.object.get("allowed_paths") orelse return;
+        if (paths_val != .array) return;
+
+        // Allocate new paths in the main config allocator (arena)
+        const new_paths = try self.allocator.alloc([]const u8, paths_val.array.items.len);
+        for (paths_val.array.items, 0..) |item, i| {
+            if (item == .string) {
+                new_paths[i] = try self.allocator.dupe(u8, item.string);
+            } else {
+                new_paths[i] = "";
+            }
+        }
+
+        self.autonomy.allowed_paths = new_paths;
+        self.syncFlatFields();
+    }
+
     /// Free all memory owned by this config (arena + heap pointer).
     /// No-op for configs created without load() (e.g. in tests).
     pub fn deinit(self: *Config) void {

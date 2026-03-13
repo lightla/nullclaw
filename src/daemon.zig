@@ -156,7 +156,8 @@ fn gatewayThread(allocator: std.mem.Allocator, config: *const Config, host: []co
 
 /// Heartbeat thread — periodically writes state file, checks health, and
 /// runs HEARTBEAT.md polling ticks on the configured heartbeat interval.
-fn heartbeatThread(allocator: std.mem.Allocator, config: *const Config, state: *DaemonState) void {
+/// Also reloads config.json allowed_paths if the file has been modified.
+fn heartbeatThread(allocator: std.mem.Allocator, config: *Config, state: *DaemonState) void {
     const state_path = stateFilePath(allocator, config) catch return;
     defer allocator.free(state_path);
 
@@ -184,6 +185,14 @@ fn heartbeatThread(allocator: std.mem.Allocator, config: *const Config, state: *
     const heartbeat_interval_ns: i128 = @as(i128, @intCast(heartbeat_engine.interval_minutes)) * 60 * std.time.ns_per_s;
     var next_heartbeat_tick_at_ns: i128 = std.time.nanoTimestamp() + heartbeat_interval_ns;
 
+    var last_config_mtime: i128 = 0;
+    if (std.fs.openFileAbsolute(config.config_path, .{})) |file| {
+        defer file.close();
+        if (file.stat()) |st| {
+            last_config_mtime = st.mtime;
+        } else |_| {}
+    } else |_| {}
+
     while (!isShutdownRequested()) {
         writeStateFile(allocator, state_path, state) catch {};
         health.markComponentOk("heartbeat");
@@ -203,6 +212,20 @@ fn heartbeatThread(allocator: std.mem.Allocator, config: *const Config, state: *
             }
             next_heartbeat_tick_at_ns = now_ns + heartbeat_interval_ns;
         }
+
+        // Check for config updates (hot reload)
+        if (std.fs.openFileAbsolute(config.config_path, .{})) |file| {
+            defer file.close();
+            if (file.stat()) |st| {
+                if (st.mtime > last_config_mtime) {
+                    log.info("Config file changed, refreshing allowed paths...", .{});
+                    config.refreshAllowedPaths() catch |err| {
+                        log.warn("Failed to refresh config: {s}", .{@errorName(err)});
+                    };
+                    last_config_mtime = st.mtime;
+                }
+            } else |_| {}
+        } else |_| {}
 
         std.Thread.sleep(STATUS_FLUSH_SECONDS * std.time.ns_per_s);
     }
@@ -922,7 +945,7 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
     var hb_thread: ?std.Thread = null;
     if (config.heartbeat.enabled) {
         state.markRunning("heartbeat");
-        if (std.Thread.spawn(.{ .stack_size = thread_stacks.AUXILIARY_LOOP_STACK_SIZE }, heartbeatThread, .{ allocator, config, &state })) |thread| {
+        if (std.Thread.spawn(.{ .stack_size = thread_stacks.AUXILIARY_LOOP_STACK_SIZE }, heartbeatThread, .{ allocator, @as(*Config, @constCast(config)), &state })) |thread| {
             hb_thread = thread;
         } else |err| {
             state.markError("heartbeat", @errorName(err));
