@@ -104,3 +104,7 @@ zig build -Doptimize=ReleaseSmall
 nullclaw gateway
 
 killall nullclaw
+
+
+CUSTOM
+nullclaw workspace append
