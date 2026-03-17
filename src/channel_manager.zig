@@ -15,6 +15,7 @@ const channel_loop = @import("channel_loop.zig");
 const health = @import("health.zig");
 const daemon = @import("daemon.zig");
 const channels_mod = @import("channels/root.zig");
+const agent_routing = @import("agent_routing.zig");
 const mattermost = channels_mod.mattermost;
 const discord = channels_mod.discord;
 const imessage = channels_mod.imessage;
@@ -252,7 +253,18 @@ pub const ChannelManager = struct {
                     if (ptr.size != .slice) continue;
                     const items = @field(self.config.channels, field.name);
                     for (items) |cfg| {
-                        try self.appendChannelFromConfig(field.name, cfg);
+                        if (comptime std.mem.eql(u8, field.name, "slack")) {
+                            // Resolve agent_id from bindings (account_id → agent_id mapping).
+                            var patched = cfg;
+                            patched.agent_id = agent_routing.resolveAgentIdForAccount(
+                                self.config.agent_bindings,
+                                "slack",
+                                cfg.account_id,
+                            );
+                            try self.appendChannelFromConfig(field.name, patched);
+                        } else {
+                            try self.appendChannelFromConfig(field.name, cfg);
+                        }
                     }
                 },
                 .optional => |opt| {

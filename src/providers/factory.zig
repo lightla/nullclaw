@@ -12,6 +12,7 @@ const claude_cli = @import("claude_cli.zig");
 const codex_cli = @import("codex_cli.zig");
 const openai_codex = @import("openai_codex.zig");
 const gemini_cli = @import("gemini_cli.zig");
+const claude_mod = @import("claude.zig");
 
 
 pub const ProviderKind = enum {
@@ -26,6 +27,7 @@ pub const ProviderKind = enum {
     codex_cli_provider,
     openai_codex_provider,
     gemini_cli_provider, // 👈 thêm
+    claude_provider,
     unknown,
 };
 
@@ -201,6 +203,7 @@ const core_providers = std.StaticStringMap(ProviderKind).initComptime(.{
     .{ "vertex-ai", .vertex_provider },
     .{ "google-vertex", .vertex_provider },
     .{ "claude-cli", .claude_cli_provider },
+    .{ "claude", .claude_provider },
     .{ "codex-cli", .codex_cli_provider },
     .{ "openai-codex", .openai_codex_provider },
 });
@@ -261,6 +264,7 @@ pub const ProviderHolder = union(enum) {
     ollama: ollama.OllamaProvider,
     compatible: compatible.OpenAiCompatibleProvider,
     claude_cli: claude_cli.ClaudeCliProvider,
+    claude: claude_mod.ClaudeProvider,
     codex_cli: codex_cli.CodexCliProvider,
     openai_codex: openai_codex.OpenAiCodexProvider,
 
@@ -276,6 +280,7 @@ pub const ProviderHolder = union(enum) {
             .ollama => |*p| p.provider(),
             .compatible => |*p| p.provider(),
             .claude_cli => |*p| p.provider(),
+            .claude => |*p| p.provider(),
             .codex_cli => |*p| p.provider(),
             .openai_codex => |*p| p.provider(),
         };
@@ -350,6 +355,7 @@ pub const ProviderHolder = union(enum) {
                 .{ .claude_cli = p }
             else |_|
                 .{ .openrouter = openrouter.OpenRouterProvider.init(allocator, api_key) },
+            .claude_provider => .{ .claude = claude_mod.ClaudeProvider.init(allocator, api_key, null) },
             .codex_cli_provider => if (codex_cli.CodexCliProvider.init(allocator, null)) |p|
                 .{ .codex_cli = p }
             else |_|
@@ -671,6 +677,7 @@ test "ProviderHolder tagged union has all expected fields" {
     try std.testing.expect(@hasField(ProviderHolder, "ollama"));
     try std.testing.expect(@hasField(ProviderHolder, "compatible"));
     try std.testing.expect(@hasField(ProviderHolder, "claude_cli"));
+    try std.testing.expect(@hasField(ProviderHolder, "claude"));
     try std.testing.expect(@hasField(ProviderHolder, "codex_cli"));
     try std.testing.expect(@hasField(ProviderHolder, "openai_codex"));
 }
@@ -727,4 +734,8 @@ test "ProviderHolder.fromConfig routes to correct variant" {
 test "compat_providers table count" {
     // Verify we have the expected number of entries (guard against accidental deletions).
     try std.testing.expect(compat_providers.len >= 89);
+}
+
+test "classifyProvider claude routes to claude_provider" {
+    try std.testing.expect(classifyProvider("claude") == .claude_provider);
 }

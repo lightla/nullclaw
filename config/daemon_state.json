@@ -1,0 +1,9 @@
+{
+  "status": "running",
+  "gateway": "127.0.0.1:3000",
+  "components": [
+    {"name": "gateway", "running": true, "restart_count": 0},
+    {"name": "channels", "running": true, "restart_count": 0},
+    {"name": "scheduler", "running": true, "restart_count": 0}
+  ]
+}

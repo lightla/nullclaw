@@ -35,46 +35,26 @@ pub const GeminiCliProvider = struct {
     fn chatImpl(ptr: *anyopaque, allocator: std.mem.Allocator, request: ChatRequest, model: []const u8, _: f64) anyerror!ChatResponse {
         const self: *GeminiCliProvider = @ptrCast(@alignCast(ptr));
         const effective_model = if (model.len > 0) model else self.model;
-        
-        var m_pure = effective_model;
-        var agent_name: []const u8 = "assistant";
-        
-        if (std.mem.indexOf(u8, effective_model, "--")) |idx| {
-            m_pure = effective_model[0..idx];
-            agent_name = effective_model[idx + 2 ..];
-        }
-        
-        if (std.mem.eql(u8, agent_name, "monitor")) return ChatResponse{ .content = "", .model = try allocator.dupe(u8, effective_model), .usage = .{} };
 
-        const prompt = try constructFullAwarePrompt(allocator, request, agent_name);
+        const prompt = try constructFullAwarePrompt(allocator, request, "assistant");
         defer allocator.free(prompt);
 
-        log.info("call_gemini_cli[{s}][{s}]: {s}", .{agent_name, m_pure, if (prompt.len > 500) prompt[0..500] else prompt});
+        log.info("call_gemini_cli[{s}]: {s}", .{effective_model, if (prompt.len > 500) prompt[0..500] else prompt});
 
-        const res = try runGeminiFinal(allocator, prompt, m_pure, agent_name, null, null);
+        const res = try runGeminiFinal(allocator, prompt, effective_model, "assistant", null, null);
         return ChatResponse{ .content = res.content, .model = try allocator.dupe(u8, effective_model), .usage = res.usage };
     }
 
     fn streamChatImpl(ptr: *anyopaque, allocator: std.mem.Allocator, request: ChatRequest, model: []const u8, _: f64, callback: StreamCallback, callback_ctx: *anyopaque) anyerror!StreamChatResult {
         const self: *GeminiCliProvider = @ptrCast(@alignCast(ptr));
         const effective_model = if (model.len > 0) model else self.model;
-        
-        var m_pure = effective_model;
-        var agent_name: []const u8 = "assistant";
-        
-        if (std.mem.indexOf(u8, effective_model, "--")) |idx| {
-            m_pure = effective_model[0..idx];
-            agent_name = effective_model[idx + 2 ..];
-        }
 
-        if (std.mem.eql(u8, agent_name, "monitor")) return StreamChatResult{ .content = "", .usage = .{} };
-
-        const prompt = try constructFullAwarePrompt(allocator, request, agent_name);
+        const prompt = try constructFullAwarePrompt(allocator, request, "assistant");
         defer allocator.free(prompt);
 
-        log.info("call_gemini_cli[{s}][{s}]: {s}", .{agent_name, m_pure, if (prompt.len > 500) prompt[0..500] else prompt});
+        log.info("call_gemini_cli[{s}]: {s}", .{effective_model, if (prompt.len > 500) prompt[0..500] else prompt});
 
-        const res = try runGeminiFinal(allocator, prompt, m_pure, agent_name, callback, callback_ctx);
+        const res = try runGeminiFinal(allocator, prompt, effective_model, "assistant", callback, callback_ctx);
         callback(callback_ctx, .{ .delta = "", .is_final = true, .token_count = 0 });
         return StreamChatResult{ .content = res.content, .usage = res.usage };
     }

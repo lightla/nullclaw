@@ -45,7 +45,7 @@ git config core.hooksPath .githooks
 
 ## Project Overview
 
-NullClaw is an autonomous AI assistant runtime written in Zig 0.15.2. Hard constraints: 678 KB binary, ~1 MB peak RSS, <2 ms startup. Every dependency and abstraction has a measurable size/memory cost. Only two external dependencies: vendored SQLite (with build-time SHA256 hash verification) and `websocket.zig` (pinned commit).
+NullClaw is an autonomous AI assistant runtime written in Zig 0.15.2. Hard constraints: 678 KB binary, ~1 MB peak RSS, <2 ms startup. Every dependency and abstraction has a measurable size/memory cost. MaxRSS during `zig build test` must stay under 50 MB. Only two external dependencies: vendored SQLite (with build-time SHA256 hash verification) and `websocket.zig` (pinned commit).
 
 ## Architecture
 
@@ -85,6 +85,12 @@ Defined in `src/root.zig`. Phases mirror deployment dependencies:
 
 Concrete implementations depend inward on vtable interfaces, config, and util. Never import across subsystems (e.g., provider code must not import channel internals).
 
+### Risk Tiers
+
+- **High risk** (require boundary/failure-mode tests and threat notes): `src/security/**`, `src/gateway.zig`, `src/tools/**`, `src/runtime.zig`, config schema, vtable interfaces.
+- **Medium risk**: most `src/**` behavior changes without security/boundary impact.
+- **Low risk**: docs, comments, test additions, minor formatting. When uncertain, classify higher.
+
 ## Config System
 
 Config loads from `~/.nullclaw/config.json`. Runtime behavior is then adjusted by `NULLCLAW_*` environment overrides (see `Config.applyEnvOverrides()` in `src/config.zig`). Types are defined in `src/config_types.zig` and re-exported from `src/config.zig`.
@@ -102,10 +108,10 @@ Key config sections: `models.providers` (API keys/endpoints), `agents` (named ag
 
 ## Zig 0.15.2 API Gotchas
 
-- `std.io.getStdOut()` does NOT exist. Use `std.fs.File.stdout()`.
+- `std.io.getStdOut()` does NOT exist. Use `std.fs.File.stdout().writer(&buf)` → call `.interface` on the result for `print`/`flush`.
 - HTTP client: `std.http.Client.fetch()` with `std.Io.Writer.Allocating`.
 - Child processes: `std.process.Child.init(argv, allocator)`, `.Pipe` (capitalized).
-- `ArrayListUnmanaged`: init with `.empty`, pass allocator to every method.
+- `ArrayListUnmanaged`: init with `.empty`, pass allocator to every method. Do NOT use `.writer()` as `?*Io.Writer` — types are incompatible.
 - `ChaCha20Poly1305.decrypt`: use stack buffer then `allocator.dupe()` (heap buffer segfaults on macOS).
 - `SQLITE_TRANSIENT` in auto-translated C code: use `SQLITE_STATIC` (null) instead.
 - When unsure about API, search `src/` for existing usage rather than guessing.

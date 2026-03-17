@@ -161,7 +161,7 @@ pub const GeminiCliCredentials = struct {
     pub fn isExpired(self: GeminiCliCredentials) bool {
         const expiry = self.expires_at orelse return false;
         const now = std.time.timestamp();
-        const buffer_seconds: i64 = 5 * 60; // 5-minute safety buffer
+        const buffer_seconds: i64 = 30; // 30-second safety buffer
         return now >= (expiry - buffer_seconds);
     }
 };
@@ -344,9 +344,11 @@ pub fn tryLoadGeminiCliToken(allocator: std.mem.Allocator) ?GeminiCliCredentials
 
     // Check expiration
     if (creds.isExpired()) {
+        std.debug.print("[gemini] OAuth token expired (expires_at={?}), attempting refresh\n", .{creds.expires_at});
         // Attempt refresh if refresh_token is available
         if (creds.refresh_token) |rt| {
             if (refreshOAuthToken(allocator, rt)) |refreshed_resp| {
+                std.debug.print("[gemini] OAuth token refreshed successfully\n", .{});
                 // Build refreshed credentials
                 const now = std.time.timestamp();
                 const ttl: i64 = if (refreshed_resp.expires_in > 0) refreshed_resp.expires_in else 3600;
@@ -371,7 +373,9 @@ pub fn tryLoadGeminiCliToken(allocator: std.mem.Allocator) ?GeminiCliCredentials
                 if (creds.refresh_token) |r| allocator.free(r);
 
                 return refreshed;
-            } else |_| {}
+            } else |err| {
+                std.debug.print("[gemini] OAuth token refresh failed: {}\n", .{err});
+            }
         }
 
         // Refresh unavailable or failed — clean up and return null
@@ -804,7 +808,7 @@ pub const GeminiProvider = struct {
         var child = std.process.Child.init(argv_buf[0..argc], allocator);
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
+        child.stderr_behavior = .Pipe;
 
         try child.spawn();
 
@@ -892,7 +896,14 @@ pub const GeminiProvider = struct {
 
         const term = child.wait() catch return error.CurlWaitError;
         switch (term) {
-            .Exited => |code| if (code != 0) return error.CurlFailed,
+            .Exited => |code| if (code != 0) {
+                if (child.stderr) |stderr_file| {
+                    var err_buf: [2048]u8 = undefined;
+                    const n = stderr_file.read(&err_buf) catch 0;
+                    if (n > 0) std.debug.print("[gemini] api error: {s}\n", .{err_buf[0..n]});
+                }
+                return error.CurlFailed;
+            },
             else => return error.CurlFailed,
         }
 
@@ -1496,9 +1507,9 @@ test "GeminiCliCredentials isExpired with null expires_at returns false" {
     try std.testing.expect(!creds.isExpired());
 }
 
-test "GeminiCliCredentials isExpired with 5-min buffer edge case" {
-    // Token expires in exactly 4 minutes — within the 5-minute buffer, so should be expired
-    const almost_expired: i64 = std.time.timestamp() + 4 * 60;
+test "GeminiCliCredentials isExpired with 30-sec buffer edge case" {
+    // Token expires in exactly 10 seconds — within the 30-second buffer, so should be expired
+    const almost_expired: i64 = std.time.timestamp() + 10;
     const creds_soon = GeminiCliCredentials{
         .access_token = "ya29.test-token",
         .refresh_token = null,
@@ -1506,8 +1517,8 @@ test "GeminiCliCredentials isExpired with 5-min buffer edge case" {
     };
     try std.testing.expect(creds_soon.isExpired());
 
-    // Token expires in exactly 6 minutes — outside the 5-minute buffer, so should NOT be expired
-    const still_valid: i64 = std.time.timestamp() + 6 * 60;
+    // Token expires in 2 minutes — outside the 30-second buffer, so should NOT be expired
+    const still_valid: i64 = std.time.timestamp() + 2 * 60;
     const creds_valid = GeminiCliCredentials{
         .access_token = "ya29.test-token",
         .refresh_token = null,

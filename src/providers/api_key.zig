@@ -111,6 +111,7 @@ fn providerEnvCandidates(name: []const u8) [3][]const u8 {
         .{ "ollama", .{ "API_KEY", "", "" } },
         .{ "lmstudio", .{ "API_KEY", "", "" } },
         .{ "lm-studio", .{ "API_KEY", "", "" } },
+        .{ "claude", .{ "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "" } },
         .{ "claude-cli", .{ "ANTHROPIC_API_KEY", "", "" } },
         .{ "claude-code", .{ "ANTHROPIC_API_KEY", "", "" } },
         .{ "codex-cli", .{ "OPENAI_API_KEY", "", "" } },

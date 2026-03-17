@@ -24,10 +24,29 @@ const Tool = tools_mod.Tool;
 const SecurityPolicy = @import("security/policy.zig").SecurityPolicy;
 const streaming = @import("streaming.zig");
 const thread_stacks = @import("thread_stacks.zig");
+const NamedAgentConfig = @import("config_types.zig").NamedAgentConfig;
 const log = std.log.scoped(.session);
 const MESSAGE_LOG_MAX_BYTES: usize = 4096;
 const TOKEN_USAGE_LEDGER_FILENAME = "llm_token_usage.jsonl";
 const NS_PER_SEC: i128 = std.time.ns_per_s;
+
+/// Apply model and system_prompt overrides from a NamedAgentConfig to an Agent.
+/// Returns true so callers can set a `resolved` flag in a single expression.
+fn applyNamedAgentConfig(allocator: Allocator, agent: *Agent, named: NamedAgentConfig) !bool {
+    const model_copy = try allocator.dupe(u8, named.model);
+    if (agent.model_name_owned) allocator.free(agent.model_name);
+    agent.model_name = model_copy;
+    agent.model_name_owned = true;
+    agent.default_model = model_copy;
+    if (named.system_prompt) |sp| {
+        try agent.history.append(allocator, .{
+            .role = .system,
+            .content = try allocator.dupe(u8, sp),
+        });
+        agent.has_system_prompt = true;
+    }
+    return true;
+}
 
 fn messageLogPreview(text: []const u8) struct { slice: []const u8, truncated: bool } {
     if (text.len <= MESSAGE_LOG_MAX_BYTES) {
@@ -154,26 +173,34 @@ pub const SessionManager = struct {
         }
 
         // Override model + system_prompt based on agent_id parsed from session_key.
-        // Session key format: "agent:{agent_id}:..." — extract the second segment.
+        // Session key format: "agent:{id}:..." — extract the second segment.
+        // {id} may be either the agent name ("dev") or a channel account_id ("dev_bot").
+        // If a direct name match fails, we fall back to resolving via agent_bindings
+        // (account_id → agent_id) so that stable channel IDs can be used in session keys.
         if (std.mem.startsWith(u8, session_key, "agent:")) {
             const after_prefix = session_key["agent:".len..];
             const colon_pos = std.mem.indexOfScalar(u8, after_prefix, ':');
-            const agent_id = if (colon_pos) |pos| after_prefix[0..pos] else after_prefix;
+            const extracted_id = if (colon_pos) |pos| after_prefix[0..pos] else after_prefix;
+
+            // Step 1: direct name match.
+            var resolved = false;
             for (self.config.agents) |named| {
-                if (std.mem.eql(u8, named.name, agent_id)) {
-                    // Override model name (owned copy so Agent.deinit can free it)
-                    const model_copy = try self.allocator.dupe(u8, named.model);
-                    if (agent.model_name_owned) self.allocator.free(agent.model_name);
-                    agent.model_name = model_copy;
-                    agent.model_name_owned = true;
-                    agent.default_model = model_copy;
-                    // Inject system_prompt as the first history message if provided
-                    if (named.system_prompt) |sp| {
-                        try agent.history.append(self.allocator, .{
-                            .role = .system,
-                            .content = try self.allocator.dupe(u8, sp),
-                        });
-                        agent.has_system_prompt = true;
+                if (std.mem.eql(u8, named.name, extracted_id)) {
+                    resolved = try applyNamedAgentConfig(self.allocator, &agent, named);
+                    break;
+                }
+            }
+
+            // Step 2: if no direct match, resolve account_id → agent_id via bindings.
+            if (!resolved) {
+                for (self.config.agent_bindings) |binding| {
+                    const aid = binding.match.account_id orelse continue;
+                    if (!std.mem.eql(u8, aid, extracted_id)) continue;
+                    for (self.config.agents) |named| {
+                        if (std.mem.eql(u8, named.name, binding.agent_id)) {
+                            _ = try applyNamedAgentConfig(self.allocator, &agent, named);
+                            break;
+                        }
                     }
                     break;
                 }

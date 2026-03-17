@@ -214,6 +214,24 @@ pub fn peerMatches(binding_peer: ?PeerRef, input_peer: ?PeerRef) bool {
     return bp.kind == ip.kind and std.mem.eql(u8, bp.id, ip.id);
 }
 
+/// Find the agent_id for a given channel + account_id pair from the bindings list.
+/// Returns null if no binding matches (caller should fall back to account_id).
+pub fn resolveAgentIdForAccount(
+    bindings: []const AgentBinding,
+    channel_name: []const u8,
+    account_id: []const u8,
+) ?[]const u8 {
+    for (bindings) |b| {
+        if (b.match.channel) |bc| {
+            if (!std.mem.eql(u8, bc, channel_name)) continue;
+        }
+        if (b.match.account_id) |ba| {
+            if (std.mem.eql(u8, ba, account_id)) return b.agent_id;
+        }
+    }
+    return null;
+}
+
 /// Pre-filter: check that a binding's channel and account_id constraints
 /// match the input. A null constraint means "any" (matches everything).
 pub fn bindingMatchesScope(binding: AgentBinding, input: RouteInput) bool {

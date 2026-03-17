@@ -214,6 +214,25 @@ pub const Config = struct {
         self.max_actions_per_hour = self.autonomy.max_actions_per_hour;
     }
 
+    /// Read a single key=value from .env in cwd. Returns null if file or key not found.
+    /// Caller owns the returned slice (allocated with allocator).
+    fn loadDotEnvValue(allocator: std.mem.Allocator, key: []const u8) ?[]const u8 {
+        const file = std.fs.cwd().openFile(".env", .{}) catch return null;
+        defer file.close();
+        const content = file.readToEndAlloc(allocator, 4096) catch return null;
+        defer allocator.free(content);
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (!std.mem.startsWith(u8, trimmed, key)) continue;
+            const rest = trimmed[key.len..];
+            if (rest.len == 0 or rest[0] != '=') continue;
+            const val = std.mem.trim(u8, rest[1..], " \t\"'");
+            return allocator.dupe(u8, val) catch null;
+        }
+        return null;
+    }
+
     pub fn load(backing_allocator: std.mem.Allocator) !Config {
         // Use an arena so deinit() can free everything in one shot.
         const arena_ptr = try backing_allocator.create(std.heap.ArenaAllocator);
@@ -224,14 +243,25 @@ pub const Config = struct {
         }
         const allocator = arena_ptr.allocator();
 
-        // NULLCLAW_HOME overrides the default config directory (~/.nullclaw/).
-        const config_dir = std.process.getEnvVarOwned(allocator, "NULLCLAW_HOME") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => blk: {
-                const home = platform.getHomeDir(allocator) catch return error.NoHomeDir;
-                break :blk try std.fs.path.join(allocator, &.{ home, ".nullclaw" });
-            },
+        // NULLCLAW_HOME resolution order:
+        //   1. NULLCLAW_HOME env var (already set in shell)
+        //   2. .env file in cwd: parse NULLCLAW_HOME=<value>
+        //   3. fallback: ~/.nullclaw
+        // Relative paths (e.g. "." or "config") are resolved against cwd.
+        const raw_home: ?[]const u8 = std.process.getEnvVarOwned(allocator, "NULLCLAW_HOME") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => loadDotEnvValue(allocator, "NULLCLAW_HOME"),
             else => return err,
         };
+        const config_dir = if (raw_home) |raw| blk: {
+            // Resolve relative path to absolute.
+            if (std.fs.path.isAbsolute(raw)) break :blk raw;
+            const abs = try std.fs.cwd().realpathAlloc(allocator, raw);
+            break :blk abs;
+        } else blk: {
+            const home = platform.getHomeDir(allocator) catch return error.NoHomeDir;
+            break :blk try std.fs.path.join(allocator, &.{ home, ".nullclaw" });
+        };
+        std.debug.print("[nullclaw] config dir: {s}\n", .{config_dir});
         const config_path = try std.fs.path.join(allocator, &.{ config_dir, "config.json" });
         const default_workspace_dir = try std.fs.path.join(allocator, &.{ config_dir, "workspace" });
 
@@ -259,6 +289,18 @@ pub const Config = struct {
         } else |_| {
             // Config file doesn't exist yet — use defaults
         }
+
+        // Load actor.config.json from same directory if present.
+        // Actors are merged into cfg.agents and cfg.agent_bindings.
+        const actor_config_path = try std.fs.path.join(allocator, &.{ config_dir, "actor.config.json" });
+        if (std.fs.openFileAbsolute(actor_config_path, .{})) |file| {
+            defer file.close();
+            const content = try file.readToEndAlloc(allocator, 1024 * 64);
+            cfg.parseActorConfig(content) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => std.debug.print("Warning: failed to parse actor.config.json: {s}\n", .{@errorName(err)}),
+            };
+        } else |_| {}
 
         // Use workspace_dir_override if set, otherwise use default
         if (cfg.workspace_dir_override != null) {
@@ -338,6 +380,10 @@ pub const Config = struct {
 
     pub fn parseJson(self: *Config, content: []const u8) !void {
         return config_parse.parseJson(self, content);
+    }
+
+    pub fn parseActorConfig(self: *Config, content: []const u8) !void {
+        return config_parse.parseActorConfig(self, content);
     }
 
     fn writeChannelFieldSeparator(w: *std.Io.Writer, wrote_any: bool) !void {

@@ -278,6 +278,8 @@ pub const SlackReplyToMode = enum {
 
 pub const SlackConfig = struct {
     account_id: []const u8 = "default",
+    /// Resolved at startup from bindings config. Not read from JSON directly.
+    agent_id: ?[]const u8 = null,
     mode: SlackReceiveMode = .socket,
     bot_token: []const u8,
     app_token: ?[]const u8 = null,
@@ -1292,6 +1294,8 @@ pub const NamedAgentConfig = struct {
     name: []const u8,
     provider: []const u8,
     model: []const u8,
+    /// Fallback model if primary is unavailable. "default" or null means use global default.
+    fallback_model: ?[]const u8 = null,
     system_prompt: ?[]const u8 = null,
     api_key: ?[]const u8 = null,
     temperature: ?f64 = null,

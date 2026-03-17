@@ -18,6 +18,9 @@ result
 .direnv/
 .worktrees
 config.signal.json
+config.json
+config/config.json
+config/actor.config.json
 
 # IDE configurations
 .idea/

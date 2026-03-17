@@ -10,6 +10,9 @@ const log = std.log.scoped(.slack);
 pub const SlackChannel = struct {
     allocator: std.mem.Allocator,
     account_id: []const u8 = "default",
+    /// Agent name resolved from bindings at startup (e.g. "dev", "mentor").
+    /// Falls back to account_id if not set.
+    agent_id: ?[]const u8 = null,
     bot_token: []const u8,
     app_token: ?[]const u8,
     channel_id: ?[]const u8 = null,
@@ -37,6 +40,7 @@ pub const SlackChannel = struct {
             .channel_id = cfg.channel_id,
             .allow_from = cfg.allow_from,
             .account_id = cfg.account_id,
+            .agent_id = cfg.agent_id,
             .reply_to_mode = cfg.reply_to_mode,
             .policy = .{ .group = .open, .allowlist = cfg.allow_from },
             // startup_ts will be set in vtableStart
@@ -109,7 +113,14 @@ pub const SlackChannel = struct {
         const msg_ts = std.fmt.parseFloat(f64, ts_str) catch 0.0;
         const effective_is_live = is_live and (msg_ts >= self.startup_ts);
 
-        const my_session_key = try std.fmt.allocPrint(self.allocator, "slack:{s}:{s}", .{self.account_id, channel_id});
+        // Use agent_id resolved from bindings at startup; fall back to account_id.
+        // Used for mention detection (/dev, /mentor, etc.).
+        const base_name = self.agent_id orelse self.account_id;
+
+        // Session key uses account_id (stable config-defined ID, e.g. "dev_bot") — not the
+        // human-readable agent name which could collide. getOrCreate() resolves the agent
+        // config via a binding fallback: account_id → agent_id → named agent config.
+        const my_session_key = try std.fmt.allocPrint(self.allocator, "agent:{s}:slack:channel:{s}", .{self.account_id, channel_id});
         defer self.allocator.free(my_session_key);
 
         if (effective_is_live) {
@@ -122,9 +133,6 @@ pub const SlackChannel = struct {
                     is_self_mentioned = true;
                 }
             }
-            
-            // 2. Kiểm tra Alias dựa trên account_id (ví dụ: "dev_bot" -> "dev")
-            const base_name = if (std.mem.indexOf(u8, self.account_id, "_bot")) |idx| self.account_id[0..idx] else self.account_id;
             
             var name_matched = false;
             {
@@ -207,24 +215,24 @@ pub const SlackChannel = struct {
 
         var metadata = std.ArrayListUnmanaged(u8).empty;
         defer metadata.deinit(self.allocator);
-        try metadata.writer(self.allocator).print(
-            "{{\"account_id\":\"{s}\",\"ts\":\"{s}\",\"bot_id\":\"{s}\",\"bot_name\":\"{s}\"}}",
-            .{ self.account_id, message_ts, self.bot_user_id orelse "", self.bot_name orelse "" },
-        );
+        // Include channel_id and thread_id so that inbound routing can build the correct
+        // threaded session key and deriveSlackPeer has the raw channel without thread suffix.
+        if (thread_ts) |tts| {
+            try metadata.writer(self.allocator).print(
+                "{{\"account_id\":\"{s}\",\"ts\":\"{s}\",\"bot_id\":\"{s}\",\"bot_name\":\"{s}\",\"channel_id\":\"{s}\",\"thread_id\":\"{s}\"}}",
+                .{ self.account_id, message_ts, self.bot_user_id orelse "", self.bot_name orelse "", channel_id, tts },
+            );
+        } else {
+            try metadata.writer(self.allocator).print(
+                "{{\"account_id\":\"{s}\",\"ts\":\"{s}\",\"bot_id\":\"{s}\",\"bot_name\":\"{s}\",\"channel_id\":\"{s}\"}}",
+                .{ self.account_id, message_ts, self.bot_user_id orelse "", self.bot_name orelse "", channel_id },
+            );
+        }
 
         const tagged_text = try std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ agent_name, raw_text });
         defer self.allocator.free(tagged_text);
 
-        // CHIÊU CUỐI: ÉP MODEL NAME KÈM AGENT NAME ĐỂ PROVIDER KHÔNG THỂ NHẦM LẪN
-        const forced_model = try std.fmt.allocPrint(self.allocator, "gemini-3-flash-preview--{s}", .{agent_name});
-        defer self.allocator.free(forced_model);
-
         var inbound = try bus_mod.makeInboundFull(self.allocator, "slack", sender_id, chat_id, tagged_text, session_key, &.{}, metadata.items);
-        
-        // DÙNG PHẢN CHIẾU (REFLECTION) ĐỂ GHI ĐÈ MODEL (Vì Struct InboundMessage không cho gán trực tiếp dễ dàng)
-        // Nhưng trong makeInboundFull không có tham số model, NullClaw sẽ lấy từ Binding
-        // Vì ta đã sửa config.json nên NullClaw SẼ lấy đúng Agent.
-
         if (self.bus) |b| b.publishInbound(inbound) catch |err| { log.err("LỖI BUS: {}", .{err}); inbound.deinit(self.allocator); };
     }
 
