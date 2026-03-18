@@ -276,15 +276,24 @@ pub const ClaudeCliProvider = struct {
                                                 }
                                             }
                                         }
-                                        // Usage stats
-                                        if (obj.get("stats")) |stats| {
-                                            if (stats == .object) {
-                                                if (stats.object.get("output_tokens")) |ot| {
-                                                    if (ot == .integer) usage.total_tokens += @intCast(ot.integer);
+                                        // Usage stats (claude CLI returns "usage" object in result event)
+                                        if (obj.get("usage")) |u| {
+                                            if (u == .object) {
+                                                if (u.object.get("input_tokens")) |it| {
+                                                    if (it == .integer) usage.prompt_tokens += @intCast(it.integer);
                                                 }
-                                                if (stats.object.get("input_tokens")) |it| {
-                                                    if (it == .integer) usage.total_tokens += @intCast(it.integer);
+                                                if (u.object.get("output_tokens")) |ot| {
+                                                    if (ot == .integer) usage.completion_tokens += @intCast(ot.integer);
                                                 }
+                                                // cache_read + cache_creation are "free" reads but
+                                                // we surface them in total so the user sees real cost
+                                                if (u.object.get("cache_read_input_tokens")) |cr| {
+                                                    if (cr == .integer) usage.prompt_tokens += @intCast(cr.integer);
+                                                }
+                                                if (u.object.get("cache_creation_input_tokens")) |cc| {
+                                                    if (cc == .integer) usage.prompt_tokens += @intCast(cc.integer);
+                                                }
+                                                usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
                                             }
                                         }
                                         // Fallback: result field if content still empty
