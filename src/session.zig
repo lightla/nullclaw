@@ -50,6 +50,35 @@ fn applyNamedAgentConfig(allocator: Allocator, agent: *Agent, named: NamedAgentC
     return true;
 }
 
+/// Detects `:mem <query>` anywhere in a message.
+/// Returns the query string (trimmed text after `:mem`), null if not found.
+fn detectMemQuery(content: []const u8) ?[]const u8 {
+    const prefix = ":mem ";
+    const idx = std.mem.indexOf(u8, content, prefix) orelse return null;
+    const after = content[idx + prefix.len..];
+    // Take until end of line (or end of string)
+    const end = std.mem.indexOfAny(u8, after, "\r\n") orelse after.len;
+    const query = std.mem.trim(u8, after[0..end], " \t");
+    if (query.len == 0) return null;
+    return query;
+}
+
+/// Builds enriched content string from already-fetched entries.
+/// Caller owns the returned slice. Returns null on error.
+fn buildMemEnrichedContentFromEntries(allocator: Allocator, entries: []const memory_mod.MemoryEntry, query: []const u8) ?[]const u8 {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    errdefer buf.deinit(allocator);
+
+    buf.appendSlice(allocator, "[BỘ NHỚ LIÊN QUAN TỪ LỊCH SỬ]\n") catch return null;
+    for (entries) |e| {
+        std.fmt.format(buf.writer(allocator), "- {s}\n", .{e.content}) catch continue;
+    }
+    buf.appendSlice(allocator, "\n") catch return null;
+    buf.appendSlice(allocator, query) catch return null;
+
+    return buf.toOwnedSlice(allocator) catch null;
+}
+
 fn messageLogPreview(text: []const u8) struct { slice: []const u8, truncated: bool } {
     if (text.len <= MESSAGE_LOG_MAX_BYTES) {
         return .{ .slice = text, .truncated = false };
@@ -529,7 +558,38 @@ pub const SessionManager = struct {
             session.agent.stream_ctx = null;
         }
 
-        const response = try session.agent.turn(content);
+        // :mem <query> — search SQLite history and inject as context for this turn
+        var mem_enriched: ?[]const u8 = null;
+        defer if (mem_enriched) |s| self.allocator.free(s);
+        if (detectMemQuery(content)) |query| {
+            if (session.agent.mem) |mem| {
+                log.info("mem-search query=\"{s}\"", .{query});
+                const entries_const = mem.recall(self.allocator, query, 10, session_key) catch |err| blk: {
+                    log.warn("mem-search failed: {}", .{err});
+                    break :blk @as([]memory_mod.MemoryEntry, &.{});
+                };
+                defer memory_mod.freeEntries(self.allocator, entries_const);
+                const entries: []const memory_mod.MemoryEntry = entries_const;
+                log.info("mem-search found={d} results", .{entries.len});
+                for (entries, 0..) |e, i| {
+                    const preview = if (e.content.len > 120) e.content[0..120] else e.content;
+                    log.info("mem-search [{d}] score={?d:.2} content=\"{s}\"", .{ i + 1, e.score, preview });
+                }
+                if (entries.len > 0) {
+                    mem_enriched = buildMemEnrichedContentFromEntries(self.allocator, entries, query);
+                    if (mem_enriched != null) {
+                        log.info("mem-search injected {d} entries into prompt", .{entries.len});
+                    }
+                } else {
+                    log.warn("mem-search no results — sending query without context", .{});
+                }
+            } else {
+                log.warn("mem-search triggered but memory backend not configured", .{});
+            }
+        }
+        const effective_content = mem_enriched orelse content;
+
+        const response = try session.agent.turn(effective_content);
         session.turn_count += 1;
         session.last_active = std.time.timestamp();
 

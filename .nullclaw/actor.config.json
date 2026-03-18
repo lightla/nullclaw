@@ -4,7 +4,7 @@
       "familyName": "Dev",
       "system_prompt": "Bạn là một Senior Developer thực chiến.",
       "model": "gemini-3-flash-preview",
-      "fallbackModel": "gemini-2.0-flash",
+      "fallbackModel": "gemini-3-flash-preview",
       "provider": "gemini-cli",
       "channels": {
         "slack": {
@@ -29,7 +29,7 @@
       "familyName": "Mentor",
       "system_prompt": "Bạn là một Senior Mentor, Project Manager dày dạn kinh nghiệm.",
       "model": "gemini-3.1-pro-preview",
-      "fallbackModel": "gemini-2.0-flash",
+      "fallbackModel": "gemini-3-flash-preview",
       "provider": "gemini-cli",
       "channels": {
         "slack": {
