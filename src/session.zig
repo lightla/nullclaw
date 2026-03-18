@@ -15,6 +15,8 @@ const Agent = @import("agent/root.zig").Agent;
 const ConversationContext = @import("agent/prompt.zig").ConversationContext;
 const providers = @import("providers/root.zig");
 const Provider = providers.Provider;
+const providers_factory = @import("providers/factory.zig");
+const providers_api_key = @import("providers/api_key.zig");
 const memory_mod = @import("memory/root.zig");
 const Memory = memory_mod.Memory;
 const observability = @import("observability.zig");
@@ -99,12 +101,20 @@ pub const Session = struct {
     turn_count: u64,
     turn_running: std.atomic.Value(bool),
     mutex: std.Thread.Mutex,
+    /// Per-session provider created when the named agent config specifies a
+    /// different provider than the SessionManager default (e.g. claude-cli vs
+    /// gemini-cli). Null when the session shares the global provider.
+    owned_provider: ?*providers_factory.ProviderHolder = null,
 
     pub fn deinit(self: *Session, allocator: Allocator) void {
         if (self.agent.gemini_session_cwd) |dir| allocator.free(dir);
         self.agent.gemini_session_cwd = null;
         self.agent.deinit();
         allocator.free(self.session_key);
+        if (self.owned_provider) |ph| {
+            ph.deinit();
+            allocator.destroy(ph);
+        }
     }
 };
 
@@ -227,6 +237,7 @@ pub const SessionManager = struct {
         // {id} may be either the agent name ("dev") or a channel account_id ("dev_bot").
         // If a direct name match fails, we fall back to resolving via agent_bindings
         // (account_id → agent_id) so that stable channel IDs can be used in session keys.
+        var resolved_provider_name: ?[]const u8 = null;
         if (std.mem.startsWith(u8, session_key, "agent:")) {
             const after_prefix = session_key["agent:".len..];
             const colon_pos = std.mem.indexOfScalar(u8, after_prefix, ':');
@@ -237,6 +248,7 @@ pub const SessionManager = struct {
             for (self.config.agents) |named| {
                 if (std.mem.eql(u8, named.name, extracted_id)) {
                     resolved = try applyNamedAgentConfig(self.allocator, &agent, named);
+                    resolved_provider_name = named.provider;
                     break;
                 }
             }
@@ -249,6 +261,7 @@ pub const SessionManager = struct {
                     for (self.config.agents) |named| {
                         if (std.mem.eql(u8, named.name, binding.agent_id)) {
                             _ = try applyNamedAgentConfig(self.allocator, &agent, named);
+                            resolved_provider_name = named.provider;
                             break;
                         }
                     }
@@ -256,6 +269,34 @@ pub const SessionManager = struct {
                 }
             }
         }
+
+        // If named config specifies a provider, create a per-session ProviderHolder
+        // so the agent uses the correct backend regardless of the SessionManager default.
+        var owned_provider: ?*providers_factory.ProviderHolder = null;
+        if (resolved_provider_name) |pname| {
+            const api_key = providers_api_key.resolveApiKeyFromConfig(
+                self.allocator,
+                pname,
+                self.config.providers,
+            ) catch null;
+            defer if (api_key) |k| self.allocator.free(k);
+
+            const ph = try self.allocator.create(providers_factory.ProviderHolder);
+            ph.* = providers_factory.ProviderHolder.fromConfig(
+                self.allocator,
+                pname,
+                api_key,
+                null,
+                self.config.getProviderNativeTools(pname),
+                null,
+            );
+            agent.provider = ph.provider();
+            owned_provider = ph;
+        }
+        errdefer if (owned_provider) |ph| {
+            ph.deinit();
+            self.allocator.destroy(ph);
+        };
 
         session.* = .{
             .agent = agent,
@@ -266,6 +307,7 @@ pub const SessionManager = struct {
             .turn_count = 0,
             .turn_running = std.atomic.Value(bool).init(false),
             .mutex = .{},
+            .owned_provider = owned_provider,
         };
         // From here, session owns agent — must deinit on error.
         errdefer session.agent.deinit();
