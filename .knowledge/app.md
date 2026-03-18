@@ -1,5 +1,8 @@
 # NullClaw — App Flow & Provider Architecture
 
+> See also: `gemini-cli-flow.md` (session lifecycle, memory model, fallback)
+> See also: `provider-flow.md` (gemini vs gemini-cli, current flow diagram)
+
 ## 0. AI Design Flow Behavior (Actor Model)
 
 ### Concept
