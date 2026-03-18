@@ -238,6 +238,12 @@ pub const Agent = struct {
     mem_rt: ?*memory_mod.MemoryRuntime = null,
     /// Optional session scope for memory read/write operations.
     memory_session_id: ?[]const u8 = null,
+    /// gemini-cli only: per-session working directory for subprocess isolation.
+    /// Set by SessionManager on session creation. Not owned by Agent (owned by SessionManager).
+    gemini_session_cwd: ?[]const u8 = null,
+    /// Actor name resolved from named agent config (e.g. "dev", "mentor").
+    /// Used for logging. Points into config-owned memory — not freed by Agent.
+    actor_name: []const u8 = "",
     observer: Observer,
     model_name: []const u8,
     model_name_owned: bool = false,
@@ -1155,6 +1161,8 @@ pub const Agent = struct {
                         .tools = null,
                         .timeout_secs = self.message_timeout_secs,
                         .reasoning_effort = self.reasoning_effort,
+                        .gemini_session_cwd = self.gemini_session_cwd,
+                        .actor_name = self.actor_name,
                     },
                     self.model_name,
                     self.temperature,
@@ -1194,6 +1202,8 @@ pub const Agent = struct {
                                 .tools = null,
                                 .timeout_secs = self.message_timeout_secs,
                                 .reasoning_effort = self.reasoning_effort,
+                                .gemini_session_cwd = self.gemini_session_cwd,
+                        .actor_name = self.actor_name,
                             },
                             self.model_name,
                             self.temperature,
@@ -1226,6 +1236,8 @@ pub const Agent = struct {
                         .tools = if (native_tools_enabled) turn_tool_specs else null,
                         .timeout_secs = self.message_timeout_secs,
                         .reasoning_effort = self.reasoning_effort,
+                        .gemini_session_cwd = self.gemini_session_cwd,
+                        .actor_name = self.actor_name,
                     },
                     self.model_name,
                     self.temperature,
@@ -1263,6 +1275,8 @@ pub const Agent = struct {
                                 .tools = if (native_tools_enabled) turn_tool_specs else null,
                                 .timeout_secs = self.message_timeout_secs,
                                 .reasoning_effort = self.reasoning_effort,
+                                .gemini_session_cwd = self.gemini_session_cwd,
+                        .actor_name = self.actor_name,
                             },
                             self.model_name,
                             self.temperature,

@@ -274,6 +274,12 @@ pub const ChatRequest = struct {
     timeout_secs: u64 = 0,
     /// Reasoning effort for reasoning models (o1, o3, gpt-5*). null = don't send.
     reasoning_effort: ?[]const u8 = null,
+    /// gemini-cli only: working directory for the subprocess. Each NullClaw session
+    /// maps to a unique directory so gemini stores history in isolation.
+    /// null = no session isolation (legacy behavior, full prompt every call).
+    gemini_session_cwd: ?[]const u8 = null,
+    /// Actor name for logging (e.g. "dev", "mentor"). Empty string if not set.
+    actor_name: []const u8 = "",
 };
 
 /// A single tool result message in a conversation.

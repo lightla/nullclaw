@@ -38,6 +38,7 @@ fn applyNamedAgentConfig(allocator: Allocator, agent: *Agent, named: NamedAgentC
     agent.model_name = model_copy;
     agent.model_name_owned = true;
     agent.default_model = model_copy;
+    agent.actor_name = named.name;
     if (named.system_prompt) |sp| {
         try agent.history.append(allocator, .{
             .role = .system,
@@ -70,6 +71,8 @@ pub const Session = struct {
     mutex: std.Thread.Mutex,
 
     pub fn deinit(self: *Session, allocator: Allocator) void {
+        if (self.agent.gemini_session_cwd) |dir| allocator.free(dir);
+        self.agent.gemini_session_cwd = null;
         self.agent.deinit();
         allocator.free(self.session_key);
     }
@@ -167,6 +170,23 @@ pub const SessionManager = struct {
         agent.response_cache = self.response_cache;
         agent.mem_rt = self.mem_rt;
         agent.memory_session_id = owned_key;
+
+        // Set up isolated gemini-cli session directory (hash of session_key).
+        // Each NullClaw session gets its own cwd so gemini stores history separately.
+        {
+            const config_dir = std.fs.path.dirname(self.config.config_path) orelse ".";
+            const hash = std.hash.Wyhash.hash(0, session_key);
+            const session_dir = std.fmt.allocPrint(self.allocator, "{s}/gemini-sessions/{x:0>16}", .{ config_dir, hash }) catch null;
+            if (session_dir) |dir| {
+                std.fs.cwd().makePath(dir) catch {
+                    self.allocator.free(dir);
+                };
+                if (agent.gemini_session_cwd == null) {
+                    agent.gemini_session_cwd = dir;
+                }
+            }
+        }
+
         if (self.config.diagnostics.token_usage_ledger_enabled) {
             agent.usage_record_callback = usageRecordForwarder;
             agent.usage_record_ctx = @ptrCast(self);
@@ -525,6 +545,14 @@ pub const SessionManager = struct {
                 store.clearMessages(session_key) catch {};
                 // Clear stale auto-saved memories
                 store.clearAutoSaved(session_key) catch {};
+                // Reset gemini-cli session so next call rebuilds context from scratch.
+                if (session.agent.gemini_session_cwd) |dir| {
+                    const sentinel = std.fmt.allocPrint(self.allocator, "{s}/.initialized", .{dir}) catch null;
+                    if (sentinel) |s| {
+                        defer self.allocator.free(s);
+                        std.fs.deleteFileAbsolute(s) catch {};
+                    }
+                }
             } else if (!std.mem.startsWith(u8, trimmed, "/")) {
                 // Persist user + assistant messages (skip slash commands)
                 const message_id = if (conversation_context) |ctx| ctx.message_id else null;

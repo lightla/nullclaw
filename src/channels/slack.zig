@@ -175,7 +175,7 @@ pub const SlackChannel = struct {
             }
 
             if (should_respond) {
-                log.info("[{s}] PHẢN HỒI >> {s} (ts={s})", .{self.account_id, text, ts_str});
+                log.info("{s}[slack-message-received]: {s}", .{base_name, text});
                 try self.dispatchToAgent(text, base_name, sender_id, channel_id, my_session_key, msg_obj);
                 return;
             }
