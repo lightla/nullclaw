@@ -52,3 +52,5 @@
 {"ts":1773829506,"provider":"gemini-cli","model":"gemini-3-flash-preview","prompt_tokens":0,"completion_tokens":0,"total_tokens":7102,"success":true}
 {"ts":1773829539,"provider":"gemini-cli","model":"gemini-3.1-pro-preview","prompt_tokens":0,"completion_tokens":0,"total_tokens":7357,"success":true}
 {"ts":1773829594,"provider":"gemini-cli","model":"gemini-3-flash-preview","prompt_tokens":0,"completion_tokens":0,"total_tokens":7186,"success":true}
+{"ts":1773829762,"provider":"gemini-cli","model":"gemini-3-flash-preview","prompt_tokens":0,"completion_tokens":0,"total_tokens":7145,"success":true}
+{"ts":1773829825,"provider":"gemini-cli","model":"gemini-3.1-pro-preview","prompt_tokens":0,"completion_tokens":0,"total_tokens":0,"success":true}

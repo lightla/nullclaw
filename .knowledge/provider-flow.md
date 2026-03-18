@@ -1,5 +1,50 @@
 # Provider Flow
 
+## Current Flow (gemini-cli session lifecycle)
+
+```
+User message → Slack → Bus → inboundMsgWorker (thread riêng mỗi message)
+  → session.getOrCreate(session_key)          ← tạo hoặc lấy lại session từ RAM
+  → session.mutex.lock()                      ← serialize turn TRONG CÙNG session
+  → agent.turn()
+      → agent.history (in-memory ChatMessage[])
+      → buildProviderMessages()
+      → gemini_cli.streamChatImpl()
+          ↓ check sentinel file tồn tại?
+          NO  (first call hoặc sau /reset)
+              → constructFullAwarePrompt(all agent.history)
+              → spawn: gemini -m <model> --output-format stream-json --yolo
+              → pipe full prompt vào stdin
+              → gemini tạo session mới trong gemini_session_cwd
+              → markInitialized() → tạo .initialized
+          YES (resume)
+              → extractLastUserMessage()       ← chỉ lấy tin nhắn cuối
+              → spawn: gemini --resume latest -m <model> ...
+              → gemini load lại session history của chính nó
+              → pipe chỉ message mới vào stdin
+```
+
+**Parallel execution**: dev và mentor có session_key khác nhau → session mutex khác nhau → chạy song song hoàn toàn.
+
+### Persistence sau restart NullClaw
+
+| Thành phần | Restart NullClaw | Giải thích |
+|---|---|---|
+| `agent.history` | **MẤT** | In-memory only |
+| Gemini CLI session | **GIỮ** | Stored on disk tại `gemini_session_cwd` |
+| Sentinel `.initialized` | **GIỮ** | File trên disk |
+| SQLite conversation log | **GIỮ** | Persistent store |
+
+→ Sau restart, gemini resume ngay từ call đầu vì sentinel còn. Nhưng `agent.history` rỗng → `constructFullAwarePrompt` sẽ gửi prompt không có history (chỉ có system instruction + message mới). Gemini vẫn nhớ context qua `--resume`.
+
+### SQLite hiện tại
+
+Hiện tại SQLite **không được feed vào gemini-cli**. Chỉ được dùng để:
+- Ghi log conversation (`recordMessage`)
+- `memory_loader.zig` inject vào system prompt (chỉ cho API providers, bị skip với gemini-cli vì `constructFullAwarePrompt` bỏ qua `role == .system`)
+
+---
+
 ## Tổng quan
 
 NullClaw có nhiều provider. Hai provider hay bị nhầm lẫn nhất: `gemini` và `gemini-cli`.
