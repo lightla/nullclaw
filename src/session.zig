@@ -39,6 +39,7 @@ fn applyNamedAgentConfig(allocator: Allocator, agent: *Agent, named: NamedAgentC
     agent.model_name_owned = true;
     agent.default_model = model_copy;
     agent.actor_name = named.name;
+    agent.fallback_model = named.fallback_model;
     if (named.system_prompt) |sp| {
         try agent.history.append(allocator, .{
             .role = .system,

@@ -280,6 +280,9 @@ pub const ChatRequest = struct {
     gemini_session_cwd: ?[]const u8 = null,
     /// Actor name for logging (e.g. "dev", "mentor"). Empty string if not set.
     actor_name: []const u8 = "",
+    /// gemini-cli only: fallback model to retry with on capacity/rate-limit errors.
+    /// null = no fallback retry.
+    fallback_model: ?[]const u8 = null,
 };
 
 /// A single tool result message in a conversation.

@@ -711,6 +711,170 @@ fn publishStreamingChunk(ctx_ptr: *anyopaque, event: streaming.Event) void {
     };
 }
 
+/// Per-message context passed to inboundMsgWorker threads.
+/// All string fields are owned copies; thread is responsible for freeing via deinit.
+const InboundMsgWorkerCtx = struct {
+    allocator: std.mem.Allocator,
+    event_bus: *bus_mod.Bus,
+    registry: *const dispatch.ChannelRegistry,
+    runtime: *channel_loop.ChannelRuntime,
+    msg: bus_mod.InboundMessage, // owned
+
+    fn deinit(self: *InboundMsgWorkerCtx) void {
+        self.msg.deinit(self.allocator);
+        self.allocator.destroy(self);
+    }
+};
+
+fn inboundMsgWorker(ctx: *InboundMsgWorkerCtx) void {
+    defer ctx.deinit();
+    const allocator = ctx.allocator;
+    const event_bus = ctx.event_bus;
+    const registry = ctx.registry;
+    const runtime = ctx.runtime;
+    const msg = &ctx.msg;
+
+    var parsed_meta = parseInboundMetadata(allocator, msg.metadata_json);
+    defer parsed_meta.deinit();
+
+    const outbound_account_id = parsed_meta.fields.account_id;
+    const routed_session_key = resolveInboundRouteSessionKeyWithMetadata(
+        allocator,
+        runtime.config,
+        msg,
+        parsed_meta.fields,
+    );
+    defer if (routed_session_key) |key| allocator.free(key);
+    const session_key = routed_session_key orelse msg.session_key;
+
+    const typing_recipient = sendInboundProcessingIndicator(
+        allocator,
+        registry,
+        msg.channel,
+        outbound_account_id,
+        msg.chat_id,
+        parsed_meta.fields,
+    );
+    defer clearInboundProcessingIndicator(
+        allocator,
+        registry,
+        msg.channel,
+        outbound_account_id,
+        typing_recipient,
+    );
+
+    const use_streaming_outbound = std.mem.eql(u8, msg.channel, "web") or std.mem.eql(u8, msg.channel, "telegram") or std.mem.eql(u8, msg.channel, "slack");
+    var streaming_ctx = StreamingOutboundCtx{
+        .allocator = allocator,
+        .event_bus = event_bus,
+        .channel = msg.channel,
+        .account_id = outbound_account_id,
+        .chat_id = msg.chat_id,
+    };
+    var stream_sink: ?streaming.Sink = null;
+    var outbound_tag_filter: streaming.TagFilter = undefined;
+    if (use_streaming_outbound) {
+        const raw_sink = streaming.Sink{
+            .callback = publishStreamingChunk,
+            .ctx = @ptrCast(&streaming_ctx),
+        };
+        if (std.mem.eql(u8, msg.channel, "telegram")) {
+            outbound_tag_filter = streaming.TagFilter.init(raw_sink);
+            stream_sink = outbound_tag_filter.sink();
+        } else {
+            stream_sink = raw_sink;
+        }
+    }
+
+    var participants: ?[]const []const u8 = parsed_meta.fields.participants;
+    var participants_owned = false;
+    if (participants == null and std.mem.eql(u8, msg.channel, "slack")) {
+        var parts: std.ArrayListUnmanaged([]const u8) = .empty;
+        const slack_accounts = runtime.config.channels.slack;
+        for (slack_accounts) |acc| {
+            if (acc.bot_id) |bid| {
+                const bn = acc.bot_name orelse "Unknown Bot";
+                if (parsed_meta.fields.bot_id) |my_id| {
+                    if (std.mem.eql(u8, my_id, bid)) continue;
+                }
+                const p = std.fmt.allocPrint(allocator, "{s}: <@{s}>", .{ bn, bid }) catch continue;
+                parts.append(allocator, p) catch allocator.free(p);
+            }
+        }
+        if (parts.items.len > 0) {
+            participants = parts.toOwnedSlice(allocator) catch null;
+            participants_owned = true;
+        } else {
+            parts.deinit(allocator);
+        }
+    }
+    defer if (participants_owned) {
+        if (participants) |ps| {
+            for (ps) |p| allocator.free(p);
+            allocator.free(ps);
+        }
+    };
+
+    const conv_ctx = ConversationContext{
+        .channel = msg.channel,
+        .message_id = parsed_meta.fields.message_id,
+        .bot_id = parsed_meta.fields.bot_id,
+        .bot_name = parsed_meta.fields.bot_name,
+        .participants = participants,
+    };
+
+    if (parsed_meta.fields.record_only) {
+        _ = runtime.session_mgr.recordMessage(
+            session_key,
+            msg.content,
+            conv_ctx,
+        ) catch |err| {
+            log.warn("inbound record-only failed: {}", .{err});
+        };
+        return;
+    }
+
+    const reply = runtime.session_mgr.processMessageStreaming(
+        session_key,
+        msg.content,
+        conv_ctx,
+        stream_sink,
+    ) catch |err| {
+        log.warn("inbound dispatch process failed: {}", .{err});
+        const err_msg: []const u8 = switch (err) {
+            error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
+            error.ProviderDoesNotSupportVision => "The current provider does not support image input.",
+            error.NoResponseContent => "Model returned an empty response. Please try again.",
+            error.OutOfMemory => "Out of memory.",
+            else => "An error occurred. Try again.",
+        };
+        const err_out = if (outbound_account_id) |aid|
+            bus_mod.makeOutboundWithAccount(allocator, msg.channel, aid, msg.chat_id, err_msg) catch return
+        else
+            bus_mod.makeOutbound(allocator, msg.channel, msg.chat_id, err_msg) catch return;
+        event_bus.publishOutbound(err_out) catch {
+            err_out.deinit(allocator);
+        };
+        return;
+    };
+    defer allocator.free(reply);
+
+    const out = (if (outbound_account_id) |aid|
+        bus_mod.makeOutboundWithAccount(allocator, msg.channel, aid, msg.chat_id, reply)
+    else
+        bus_mod.makeOutbound(allocator, msg.channel, msg.chat_id, reply)) catch |err| {
+        log.err("inbound dispatch makeOutbound failed: {}", .{err});
+        return;
+    };
+
+    event_bus.publishOutbound(out) catch |err| {
+        out.deinit(allocator);
+        if (err != error.Closed) {
+            log.err("inbound dispatch publishOutbound failed: {}", .{err});
+        }
+    };
+}
+
 fn inboundDispatcherThread(
     allocator: std.mem.Allocator,
     event_bus: *bus_mod.Bus,
@@ -721,156 +885,32 @@ fn inboundDispatcherThread(
     var evict_counter: u32 = 0;
 
     while (event_bus.consumeInbound()) |msg| {
-        defer msg.deinit(allocator);
-
-        var parsed_meta = parseInboundMetadata(allocator, msg.metadata_json);
-        defer parsed_meta.deinit();
-
-        const outbound_account_id = parsed_meta.fields.account_id;
-        const routed_session_key = resolveInboundRouteSessionKeyWithMetadata(
-            allocator,
-            runtime.config,
-            &msg,
-            parsed_meta.fields,
-        );
-        defer if (routed_session_key) |key| allocator.free(key);
-        const session_key = routed_session_key orelse msg.session_key;
-
-        const typing_recipient = sendInboundProcessingIndicator(
-            allocator,
-            registry,
-            msg.channel,
-            outbound_account_id,
-            msg.chat_id,
-            parsed_meta.fields,
-        );
-        defer clearInboundProcessingIndicator(
-            allocator,
-            registry,
-            msg.channel,
-            outbound_account_id,
-            typing_recipient,
-        );
-
-        const use_streaming_outbound = std.mem.eql(u8, msg.channel, "web") or std.mem.eql(u8, msg.channel, "telegram") or std.mem.eql(u8, msg.channel, "slack");
-        var streaming_ctx = StreamingOutboundCtx{
+        // Heap-allocate context so worker thread owns all data.
+        const ctx = allocator.create(InboundMsgWorkerCtx) catch {
+            msg.deinit(allocator);
+            continue;
+        };
+        ctx.* = .{
             .allocator = allocator,
             .event_bus = event_bus,
-            .channel = msg.channel,
-            .account_id = outbound_account_id,
-            .chat_id = msg.chat_id,
-        };
-        var stream_sink: ?streaming.Sink = null;
-        var outbound_tag_filter: streaming.TagFilter = undefined;
-        if (use_streaming_outbound) {
-            const raw_sink = streaming.Sink{
-                .callback = publishStreamingChunk,
-                .ctx = @ptrCast(&streaming_ctx),
-            };
-            if (std.mem.eql(u8, msg.channel, "telegram")) {
-                outbound_tag_filter = streaming.TagFilter.init(raw_sink);
-                stream_sink = outbound_tag_filter.sink();
-            } else {
-                stream_sink = raw_sink;
-            }
-        }
-
-        var participants: ?[]const []const u8 = parsed_meta.fields.participants;
-        var participants_owned = false;
-        if (participants == null and std.mem.eql(u8, msg.channel, "slack")) {
-            // Tự động thu thập danh sách các Bot khác từ cấu hình global
-            var parts: std.ArrayListUnmanaged([]const u8) = .empty;
-            const slack_accounts = runtime.config.channels.slack;
-            for (slack_accounts) |acc| {
-                if (acc.bot_id) |bid| {
-                    const bn = acc.bot_name orelse "Unknown Bot";
-                    // Không tự điền chính mình vào danh sách "Other" Participants để tránh rối
-                    if (parsed_meta.fields.bot_id) |my_id| {
-                        if (std.mem.eql(u8, my_id, bid)) continue;
-                    }
-                    const p = std.fmt.allocPrint(allocator, "{s}: <@{s}>", .{ bn, bid }) catch continue;
-                    parts.append(allocator, p) catch allocator.free(p);
-                }
-            }
-            if (parts.items.len > 0) {
-                participants = parts.toOwnedSlice(allocator) catch null;
-                participants_owned = true;
-            } else {
-                parts.deinit(allocator);
-            }
-        }
-        defer if (participants_owned) {
-            if (participants) |ps| {
-                for (ps) |p| allocator.free(p);
-                allocator.free(ps);
-            }
+            .registry = registry,
+            .runtime = runtime,
+            .msg = msg, // ownership transferred to ctx
         };
 
-        const conv_ctx = ConversationContext{
-            .channel = msg.channel,
-            .message_id = parsed_meta.fields.message_id,
-            .bot_id = parsed_meta.fields.bot_id,
-            .bot_name = parsed_meta.fields.bot_name,
-            .participants = participants,
-        };
-
-        if (parsed_meta.fields.record_only) {
-            _ = runtime.session_mgr.recordMessage(
-                session_key,
-                msg.content,
-                conv_ctx,
-            ) catch |err| {
-                log.warn("inbound record-only failed: {}", .{err});
-            };
-            continue;
-        }
-
-        const reply = runtime.session_mgr.processMessageStreaming(
-            session_key,
-            msg.content,
-            conv_ctx,
-            stream_sink,
+        _ = std.Thread.spawn(
+            .{ .stack_size = thread_stacks.SESSION_TURN_STACK_SIZE },
+            inboundMsgWorker,
+            .{ctx},
         ) catch |err| {
-            log.warn("inbound dispatch process failed: {}", .{err});
-
-            // Send user-visible error reply back to the originating channel
-            const err_msg: []const u8 = switch (err) {
-                error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
-                error.ProviderDoesNotSupportVision => "The current provider does not support image input.",
-                error.NoResponseContent => "Model returned an empty response. Please try again.",
-                error.OutOfMemory => "Out of memory.",
-                else => "An error occurred. Try again.",
-            };
-            const err_out = if (outbound_account_id) |aid|
-                bus_mod.makeOutboundWithAccount(allocator, msg.channel, aid, msg.chat_id, err_msg) catch continue
-            else
-                bus_mod.makeOutbound(allocator, msg.channel, msg.chat_id, err_msg) catch continue;
-            event_bus.publishOutbound(err_out) catch {
-                err_out.deinit(allocator);
-            };
-            continue;
-        };
-        defer allocator.free(reply);
-
-        const out = (if (outbound_account_id) |aid|
-            bus_mod.makeOutboundWithAccount(allocator, msg.channel, aid, msg.chat_id, reply)
-        else
-            bus_mod.makeOutbound(allocator, msg.channel, msg.chat_id, reply)) catch |err| {
-            log.err("inbound dispatch makeOutbound failed: {}", .{err});
-            continue;
-        };
-
-        event_bus.publishOutbound(out) catch |err| {
-            out.deinit(allocator);
-            if (err == error.Closed) break;
-            log.err("inbound dispatch publishOutbound failed: {}", .{err});
+            log.err("failed to spawn inbound worker thread: {}", .{err});
+            ctx.deinit(); // also frees msg
             continue;
         };
 
         state.markRunning("inbound_dispatcher");
         health.markComponentOk("inbound_dispatcher");
 
-        // Periodic session eviction for bus-based channels
         evict_counter += 1;
         if (evict_counter >= 100) {
             evict_counter = 0;

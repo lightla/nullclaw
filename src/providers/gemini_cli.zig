@@ -22,6 +22,27 @@ pub const GeminiCliProvider = struct {
     const InternalResult = struct {
         content: []const u8,
         usage: root.TokenUsage,
+        /// true if stderr contained a capacity/rate-limit error (RESOURCE_EXHAUSTED / rateLimitExceeded)
+        capacity_error: bool = false,
+    };
+
+    /// Reads all bytes from a file into a dynamically-allocated buffer.
+    /// Runs in a background thread to drain stderr concurrently with stdout.
+    const StderrReader = struct {
+        file: std.fs.File,
+        allocator: std.mem.Allocator,
+        buf: []const u8 = "",
+
+        fn run(self: *StderrReader) void {
+            var out = std.ArrayListUnmanaged(u8).empty;
+            var tmp: [4096]u8 = undefined;
+            while (true) {
+                const n = self.file.read(&tmp) catch break;
+                if (n == 0) break;
+                out.appendSlice(self.allocator, tmp[0..n]) catch break;
+            }
+            self.buf = out.toOwnedSlice(self.allocator) catch "";
+        }
     };
 
     pub fn init(allocator: std.mem.Allocator, model: ?[]const u8) !GeminiCliProvider {
@@ -51,7 +72,18 @@ pub const GeminiCliProvider = struct {
         log.info("{s}[{s}] calling gemini resume={}", .{ actor, effective_model, is_resume });
 
         const res = try runGeminiFinal(allocator, prompt, effective_model, actor, request.gemini_session_cwd, is_resume, null, null);
-        if (!is_resume) markInitialized(request.gemini_session_cwd);
+        if (!is_resume and !res.capacity_error) markInitialized(request.gemini_session_cwd);
+
+        if (res.capacity_error) {
+            if (request.fallback_model) |fb_model| {
+                log.warn("{s}[{s}] capacity error, retrying with fallback {s}", .{ actor, effective_model, fb_model });
+                allocator.free(res.content);
+                const fb_res = try runGeminiFinal(allocator, prompt, fb_model, actor, request.gemini_session_cwd, is_resume, null, null);
+                if (!is_resume and !fb_res.capacity_error) markInitialized(request.gemini_session_cwd);
+                return ChatResponse{ .content = fb_res.content, .model = try allocator.dupe(u8, fb_model), .usage = fb_res.usage };
+            }
+        }
+
         return ChatResponse{ .content = res.content, .model = try allocator.dupe(u8, effective_model), .usage = res.usage };
     }
 
@@ -70,7 +102,22 @@ pub const GeminiCliProvider = struct {
         log.info("{s}[{s}] calling gemini resume={}", .{ actor, effective_model, is_resume });
 
         const res = try runGeminiFinal(allocator, prompt, effective_model, actor, request.gemini_session_cwd, is_resume, callback, callback_ctx);
-        if (!is_resume) markInitialized(request.gemini_session_cwd);
+        if (!is_resume and !res.capacity_error) markInitialized(request.gemini_session_cwd);
+
+        if (res.capacity_error) {
+            if (request.fallback_model) |fb_model| {
+                log.warn("{s}[{s}] capacity error, retrying with fallback {s}", .{ actor, effective_model, fb_model });
+                allocator.free(res.content);
+                const notice = try std.fmt.allocPrint(allocator, "\n_(Model {s} quá tải, đang thử lại với {s}...)_\n\n", .{ effective_model, fb_model });
+                defer allocator.free(notice);
+                callback(callback_ctx, .{ .delta = notice, .is_final = false, .token_count = 0 });
+                const fb_res = try runGeminiFinal(allocator, prompt, fb_model, actor, request.gemini_session_cwd, is_resume, callback, callback_ctx);
+                if (!is_resume and !fb_res.capacity_error) markInitialized(request.gemini_session_cwd);
+                callback(callback_ctx, .{ .delta = "", .is_final = true, .token_count = 0 });
+                return StreamChatResult{ .content = fb_res.content, .usage = fb_res.usage };
+            }
+        }
+
         callback(callback_ctx, .{ .delta = "", .is_final = true, .token_count = 0 });
         return StreamChatResult{ .content = res.content, .usage = res.usage };
     }
@@ -104,13 +151,17 @@ pub const GeminiCliProvider = struct {
         var child = std.process.Child.init(argv.items, allocator);
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Inherit; // write directly to terminal, avoids pipe deadlock
+        child.stderr_behavior = .Pipe; // captured in stderr_reader thread to detect capacity errors
         if (session_cwd) |cwd| child.cwd = cwd;
         child.spawn() catch |err| {
             log.err("{s}[gemini] spawn failed (is 'gemini' installed?): {}", .{ actor_name, err });
             return err;
         };
-        log.info("{s}[gemini] spawned, writing prompt ({d} bytes)", .{ actor_name, prompt.len });
+        log.info("{s}[{s}] spawned, writing prompt ({d} bytes)", .{ actor_name, model_name, prompt.len });
+
+        // Drain stderr concurrently to prevent pipe deadlock while we read stdout.
+        var stderr_reader = StderrReader{ .file = child.stderr.?, .allocator = allocator };
+        const stderr_thread = try std.Thread.spawn(.{}, StderrReader.run, .{&stderr_reader});
 
         try child.stdin.?.writeAll(prompt);
         child.stdin.?.close();
@@ -173,6 +224,17 @@ pub const GeminiCliProvider = struct {
                 }
             }
         }
+
+        stderr_thread.join();
+        defer allocator.free(stderr_reader.buf);
+
+        // Detect capacity/rate-limit errors from stderr
+        const is_capacity_error = stderr_reader.buf.len > 0 and (
+            std.mem.indexOf(u8, stderr_reader.buf, "RESOURCE_EXHAUSTED") != null or
+            std.mem.indexOf(u8, stderr_reader.buf, "MODEL_CAPACITY_EXHAUSTED") != null or
+            std.mem.indexOf(u8, stderr_reader.buf, "rateLimitExceeded") != null
+        );
+
         const term = child.wait() catch |err| {
             log.err("{s}[{s}] wait() failed: {}", .{ actor_name, model_name, err });
             return InternalResult{ .content = try full_content.toOwnedSlice(allocator), .usage = usage };
@@ -181,7 +243,15 @@ pub const GeminiCliProvider = struct {
         switch (term) {
             .Exited => |code| {
                 if (code != 0) {
-                    log.err("{s}[{s}] exit={d} lines={d} bytes={d}", .{ actor_name, model_name, code, lines_received, full_content.items.len });
+                    if (is_capacity_error) {
+                        log.warn("{s}[{s}] capacity error (exit={d}), will retry with fallback", .{ actor_name, model_name, code });
+                    } else {
+                        // Not a capacity error — print stderr so it's visible for debugging
+                        if (stderr_reader.buf.len > 0) {
+                            log.err("{s}[{s}] stderr: {s}", .{ actor_name, model_name, stderr_reader.buf });
+                        }
+                        log.err("{s}[{s}] exit={d} lines={d} bytes={d}", .{ actor_name, model_name, code, lines_received, full_content.items.len });
+                    }
                 } else {
                     log.info("{s}[{s}] done exit=0 lines={d} bytes={d} tokens={d}", .{ actor_name, model_name, lines_received, full_content.items.len, usage.total_tokens });
                 }
@@ -189,11 +259,11 @@ pub const GeminiCliProvider = struct {
             else => log.warn("{s}[{s}] terminated abnormally: {}", .{ actor_name, model_name, term }),
         }
 
-        if (full_content.items.len == 0) {
+        if (full_content.items.len == 0 and !is_capacity_error) {
             log.warn("{s}[{s}] empty content (lines_received={d})", .{ actor_name, model_name, lines_received });
         }
 
-        return InternalResult{ .content = try full_content.toOwnedSlice(allocator), .usage = usage };
+        return InternalResult{ .content = try full_content.toOwnedSlice(allocator), .usage = usage, .capacity_error = is_capacity_error };
     }
 
     fn chatWithSystemImpl(_: *anyopaque, allocator: std.mem.Allocator, system_prompt: ?[]const u8, message: []const u8, model: []const u8, _: f64) anyerror![]const u8 {
