@@ -163,6 +163,9 @@ pub const SessionStore = struct {
         loadMessages: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, session_id: []const u8) anyerror![]MessageEntry,
         clearMessages: *const fn (ptr: *anyopaque, session_id: []const u8) anyerror!void,
         clearAutoSaved: *const fn (ptr: *anyopaque, session_id: ?[]const u8) anyerror!void,
+        deleteMessageById: *const fn (ptr: *anyopaque, session_id: []const u8, message_id: []const u8) anyerror!void,
+        /// Returns all non-null message_ids for the session. Caller owns the returned slice and strings.
+        loadMessageIds: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, session_id: []const u8) anyerror![][]const u8,
     };
 
     pub fn saveMessage(self: SessionStore, session_id: []const u8, role: []const u8, content: []const u8, message_id: ?[]const u8) !void {
@@ -179,6 +182,14 @@ pub const SessionStore = struct {
 
     pub fn clearAutoSaved(self: SessionStore, session_id: ?[]const u8) !void {
         return self.vtable.clearAutoSaved(self.ptr, session_id);
+    }
+
+    pub fn deleteMessageById(self: SessionStore, session_id: []const u8, message_id: []const u8) !void {
+        return self.vtable.deleteMessageById(self.ptr, session_id, message_id);
+    }
+
+    pub fn loadMessageIds(self: SessionStore, allocator: std.mem.Allocator, session_id: []const u8) ![][]const u8 {
+        return self.vtable.loadMessageIds(self.ptr, allocator, session_id);
     }
 };
 
@@ -1323,7 +1334,7 @@ test "SessionStore delegates through vtable" {
     const TestSessionStore = struct {
         call_count: usize = 0,
 
-        fn implSaveMessage(ptr: *anyopaque, _: []const u8, _: []const u8, _: []const u8) anyerror!void {
+        fn implSaveMessage(ptr: *anyopaque, _: []const u8, _: []const u8, _: []const u8, _: ?[]const u8) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.call_count += 1;
         }
@@ -1339,18 +1350,25 @@ test "SessionStore delegates through vtable" {
             self.call_count += 1;
         }
 
+        fn implDeleteMessageById(_: *anyopaque, _: []const u8, _: []const u8) anyerror!void {}
+        fn implLoadMessageIds(_: *anyopaque, allocator: std.mem.Allocator, _: []const u8) anyerror![][]const u8 {
+            return allocator.alloc([]const u8, 0);
+        }
+
         const sess_vtable = SessionStore.VTable{
             .saveMessage = &implSaveMessage,
             .loadMessages = &implLoadMessages,
             .clearMessages = &implClearMessages,
             .clearAutoSaved = &implClearAutoSaved,
+            .deleteMessageById = &implDeleteMessageById,
+            .loadMessageIds = &implLoadMessageIds,
         };
     };
 
     var mock = TestSessionStore{};
     const store = SessionStore{ .ptr = @ptrCast(&mock), .vtable = &TestSessionStore.sess_vtable };
 
-    try store.saveMessage("s1", "user", "hello");
+    try store.saveMessage("s1", "user", "hello", null);
     try std.testing.expectEqual(@as(usize, 1), mock.call_count);
 
     const msgs = try store.loadMessages(std.testing.allocator, "s1");

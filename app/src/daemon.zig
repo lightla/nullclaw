@@ -535,6 +535,9 @@ fn parseInboundMetadata(allocator: std.mem.Allocator, metadata_json: ?[]const u8
         if (pm.value.object.get("record_only")) |v| {
             if (v == .bool) parsed.fields.record_only = v.bool;
         }
+        if (pm.value.object.get("message_deleted")) |v| {
+            if (v == .bool) parsed.fields.message_deleted = v.bool;
+        }
         if (pm.value.object.get("bot_id")) |v| {
             if (v == .string) parsed.fields.bot_id = v.string;
         }
@@ -822,6 +825,34 @@ fn inboundMsgWorker(ctx: *InboundMsgWorkerCtx) void {
         .bot_name = parsed_meta.fields.bot_name,
         .participants = participants,
     };
+
+    // System commands — handled directly, no agent involved.
+    if (std.mem.indexOf(u8, msg.content, ":sync") != null) {
+        log.info("[sys] :sync requested session={s}", .{session_key});
+        const sync_result = runtime.session_mgr.syncChannel(session_key) catch |err| blk: {
+            log.warn("[sys] :sync failed: {}", .{err});
+            break :blk allocator.dupe(u8, "Sync failed.") catch return;
+        };
+        defer allocator.free(sync_result);
+        log.info("[sys] :sync done: {s}", .{sync_result});
+        const out = (if (outbound_account_id) |aid|
+            bus_mod.makeOutboundWithAccount(allocator, msg.channel, aid, msg.chat_id, sync_result)
+        else
+            bus_mod.makeOutbound(allocator, msg.channel, msg.chat_id, sync_result)) catch return;
+        event_bus.publishOutbound(out) catch {
+            out.deinit(allocator);
+        };
+        return;
+    }
+
+    if (parsed_meta.fields.message_deleted) {
+        if (parsed_meta.fields.message_id) |mid| {
+            runtime.session_mgr.deleteSessionMessage(session_key, mid) catch |err| {
+                log.warn("inbound message_deleted failed: {}", .{err});
+            };
+        }
+        return;
+    }
 
     if (parsed_meta.fields.record_only) {
         _ = runtime.session_mgr.recordMessage(

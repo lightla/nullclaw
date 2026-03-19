@@ -2451,16 +2451,67 @@ pub fn handleSlashCommand(self: anytype, message: []const u8) !?[]const u8 {
 
 fn handleMemoryCommand(self: anytype, arg: []const u8) ![]const u8 {
     const usage =
-        "Usage: /memory <stats|status|reindex|count|search|get|list|drain-outbox>\n" ++
+        "Usage: /memory <stats|status|reindex|count|search|get|list|all|last|drain-outbox>\n" ++
         "  /memory search <query> [--limit N]\n" ++
         "  /memory get <key>\n" ++
-        "  /memory list [--category C] [--limit N] [--include-internal]";
+        "  /memory list [--category C] [--limit N] [--include-internal]\n" ++
+        "  /memory all\n" ++
+        "  /memory last [N]";
 
     const parsed = splitFirstToken(arg);
     const sub = parsed.head;
     const rest = parsed.tail;
 
     if (sub.len == 0) return try self.allocator.dupe(u8, usage);
+
+    if (std.mem.eql(u8, sub, "all")) {
+        const mem_rt2 = memoryRuntimePtr(self) orelse {
+            return try self.allocator.dupe(u8, "Memory runtime not available.");
+        };
+        const entries = mem_rt2.memory.list(self.allocator, null, null) catch |err| {
+            return try std.fmt.allocPrint(self.allocator, "Memory list failed: {s}", .{@errorName(err)});
+        };
+        defer memory_mod.freeEntries(self.allocator, entries);
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        const w = out.writer(self.allocator);
+        try w.print("Memory entries: {d} total\n", .{entries.len});
+        for (entries, 0..) |e, idx| {
+            const preview_len = @min(@as(usize, 120), e.content.len);
+            try w.print("  {d}. {s} [{s}] {s}\n     {s}{s}\n", .{
+                idx + 1, e.key, e.category.toString(), e.timestamp,
+                e.content[0..preview_len], if (e.content.len > preview_len) "..." else "",
+            });
+        }
+        return try out.toOwnedSlice(self.allocator);
+    }
+
+    if (std.mem.eql(u8, sub, "last")) {
+        const n_str = std.mem.trim(u8, rest, " \t");
+        const n = if (n_str.len > 0) parsePositiveUsize(n_str) orelse 20 else 20;
+        const mem_rt2 = memoryRuntimePtr(self) orelse {
+            return try self.allocator.dupe(u8, "Memory runtime not available.");
+        };
+        const session_id = self.memory_session_id;
+        const entries = mem_rt2.memory.list(self.allocator, null, session_id) catch |err| {
+            return try std.fmt.allocPrint(self.allocator, "Memory list failed: {s}", .{@errorName(err)});
+        };
+        defer memory_mod.freeEntries(self.allocator, entries);
+        const start = if (entries.len > n) entries.len - n else 0;
+        const slice = entries[start..];
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        const w = out.writer(self.allocator);
+        try w.print("Last {d} entries (channel={s}):\n", .{ slice.len, session_id orelse "all" });
+        for (slice, 0..) |e, idx| {
+            const preview_len = @min(@as(usize, 120), e.content.len);
+            try w.print("  {d}. {s} [{s}] {s}\n     {s}{s}\n", .{
+                idx + 1, e.key, e.category.toString(), e.timestamp,
+                e.content[0..preview_len], if (e.content.len > preview_len) "..." else "",
+            });
+        }
+        return try out.toOwnedSlice(self.allocator);
+    }
 
     if (std.mem.eql(u8, sub, "doctor") or std.mem.eql(u8, sub, "status")) {
         return try handleDoctorCommand(self);

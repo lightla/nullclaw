@@ -97,9 +97,27 @@ pub const SlackChannel = struct {
     }
 
     fn handleSlackMessage(self: *SlackChannel, msg_obj: std.json.ObjectMap, channel_id: []const u8, is_live: bool) !void {
+        // Handle message_deleted subtype: dispatch a deletion event to the bus.
+        if (msg_obj.get("subtype")) |subtype_val| {
+            if (subtype_val == .string and std.mem.eql(u8, subtype_val.string, "message_deleted")) {
+                const deleted_ts = if (msg_obj.get("deleted_ts")) |v| (if (v == .string) v.string else return) else return;
+                const my_session_key = try std.fmt.allocPrint(self.allocator, "agent:{s}:slack:channel:{s}", .{ self.account_id, channel_id });
+                defer self.allocator.free(my_session_key);
+                var metadata = std.ArrayListUnmanaged(u8).empty;
+                defer metadata.deinit(self.allocator);
+                try metadata.writer(self.allocator).print(
+                    "{{\"account_id\":\"{s}\",\"message_id\":\"{s}\",\"record_only\":true,\"message_deleted\":true}}",
+                    .{ self.account_id, deleted_ts },
+                );
+                const inbound = try bus_mod.makeInboundFull(self.allocator, "slack", "system", channel_id, "", my_session_key, &.{}, metadata.items);
+                if (self.bus) |b| b.publishInbound(inbound) catch {};
+                return;
+            }
+        }
+
         const is_bot = msg_obj.get("bot_id") != null or msg_obj.get("app_id") != null;
         const sender_id = if (msg_obj.get("user")) |u| u.string else "unknown";
-        
+
         // Nếu người gửi chính là ID của bot này -> BỎ QUA TUYỆT ĐỐI
         if (self.bot_user_id) |bid| if (std.mem.eql(u8, sender_id, bid)) return;
 
@@ -183,7 +201,7 @@ pub const SlackChannel = struct {
             // Tin nhắn không tag hoặc tag cho bot khác -> Chỉ ghi nhận (Record Only) để làm bối cảnh sau này
             var metadata = std.ArrayListUnmanaged(u8).empty;
             defer metadata.deinit(self.allocator);
-            try metadata.writer(self.allocator).print("{{\"account_id\":\"{s}\",\"ts\":\"{s}\",\"record_only\":true}}", .{ self.account_id, ts_str });
+            try metadata.writer(self.allocator).print("{{\"account_id\":\"{s}\",\"ts\":\"{s}\",\"message_id\":\"{s}\",\"record_only\":true}}", .{ self.account_id, ts_str, ts_str });
 
             const inbound = try bus_mod.makeInboundFull(self.allocator, "slack", sender_id, channel_id, text, my_session_key, &.{}, metadata.items);
             if (self.bus) |b| b.publishInbound(inbound) catch {};

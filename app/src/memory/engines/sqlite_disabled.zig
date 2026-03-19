@@ -230,11 +230,18 @@ pub const SqliteMemory = struct {
         return self_.clearAutoSaved(session_id);
     }
 
+    fn implSessionDeleteMessageById(_: *anyopaque, _: []const u8, _: []const u8) anyerror!void {}
+    fn implSessionLoadMessageIds(_: *anyopaque, allocator: std.mem.Allocator, _: []const u8) anyerror![][]const u8 {
+        return allocator.alloc([]const u8, 0);
+    }
+
     const session_vtable = root.SessionStore.VTable{
         .saveMessage = &implSessionSaveMessage,
         .loadMessages = &implSessionLoadMessages,
         .clearMessages = &implSessionClearMessages,
         .clearAutoSaved = &implSessionClearAutoSaved,
+        .deleteMessageById = &implSessionDeleteMessageById,
+        .loadMessageIds = &implSessionLoadMessageIds,
     };
 
     pub fn sessionStore(self: *Self) root.SessionStore {

@@ -1034,7 +1034,7 @@ pub const Agent = struct {
             defer if (capabilities_section) |section| self.allocator.free(section);
 
             const system_prompt = try prompt.buildSystemPrompt(self.allocator, .{
-                .workspace_dir = self.workspace_dir,
+                .workspace_dir = if (self.project_dir.len > 0) self.project_dir else self.workspace_dir,
                 .model_name = self.model_name,
                 .tools = self.tools,
                 .capabilities_section = capabilities_section,

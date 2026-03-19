@@ -757,11 +757,53 @@ pub const SqliteMemory = struct {
         return self_.clearAutoSaved(session_id);
     }
 
+    pub fn deleteMessageById(self: *Self, session_id: []const u8, message_id: []const u8) !void {
+        var stmt: ?*c.sqlite3_stmt = null;
+        const sql = "DELETE FROM messages WHERE session_id = ? AND message_id = ?";
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) return error.PrepareFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+        _ = c.sqlite3_bind_text(stmt, 1, session_id.ptr, @intCast(session_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, message_id.ptr, @intCast(message_id.len), SQLITE_STATIC);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.StepFailed;
+    }
+
+    fn implSessionDeleteMessageById(ptr: *anyopaque, session_id: []const u8, message_id: []const u8) anyerror!void {
+        const self_: *Self = @ptrCast(@alignCast(ptr));
+        return self_.deleteMessageById(session_id, message_id);
+    }
+
+    pub fn loadMessageIds(self: *Self, allocator: std.mem.Allocator, session_id: []const u8) ![][]const u8 {
+        var stmt: ?*c.sqlite3_stmt = null;
+        const sql = "SELECT message_id FROM messages WHERE session_id = ? AND message_id IS NOT NULL ORDER BY id ASC";
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) return error.PrepareFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+        _ = c.sqlite3_bind_text(stmt, 1, session_id.ptr, @intCast(session_id.len), SQLITE_STATIC);
+        var list = std.ArrayListUnmanaged([]const u8).empty;
+        errdefer {
+            for (list.items) |s| allocator.free(s);
+            list.deinit(allocator);
+        }
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            const ptr_ = c.sqlite3_column_text(stmt, 0);
+            const len_: usize = @intCast(c.sqlite3_column_bytes(stmt, 0));
+            const dup = try allocator.dupe(u8, ptr_[0..len_]);
+            try list.append(allocator, dup);
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
+    fn implSessionLoadMessageIds(ptr: *anyopaque, allocator: std.mem.Allocator, session_id: []const u8) anyerror![][]const u8 {
+        const self_: *Self = @ptrCast(@alignCast(ptr));
+        return self_.loadMessageIds(allocator, session_id);
+    }
+
     const session_vtable = root.SessionStore.VTable{
         .saveMessage = &implSessionSaveMessage,
         .loadMessages = &implSessionLoadMessages,
         .clearMessages = &implSessionClearMessages,
         .clearAutoSaved = &implSessionClearAutoSaved,
+        .deleteMessageById = &implSessionDeleteMessageById,
+        .loadMessageIds = &implSessionLoadMessageIds,
     };
 
     pub fn sessionStore(self: *Self) root.SessionStore {
@@ -1066,7 +1108,7 @@ test "mountinfo parser enforces directory boundary on prefix matches" {
 test "sqlite memory init with in-memory db" {
     var mem = try SqliteMemory.init(std.testing.allocator, ":memory:");
     defer mem.deinit();
-    try mem.saveMessage("test-session", "user", "hello");
+    try mem.saveMessage("test-session", "user", "hello", null);
 }
 
 test "sqlite init configures busy timeout" {
@@ -1577,9 +1619,9 @@ test "sqlite saveMessage stores messages" {
     var mem = try SqliteMemory.init(std.testing.allocator, ":memory:");
     defer mem.deinit();
 
-    try mem.saveMessage("session-1", "user", "hello");
-    try mem.saveMessage("session-1", "assistant", "hi there");
-    try mem.saveMessage("session-2", "user", "another session");
+    try mem.saveMessage("session-1", "user", "hello", null);
+    try mem.saveMessage("session-1", "assistant", "hi there", null);
+    try mem.saveMessage("session-2", "user", "another session", null);
 
     // Verify messages table has data
     const sql = "SELECT COUNT(*) FROM messages";
@@ -1959,8 +2001,8 @@ test "sqlite sessionStore saveMessage + loadMessages roundtrip" {
     defer mem.deinit();
 
     const store = mem.sessionStore();
-    try store.saveMessage("s1", "user", "hello");
-    try store.saveMessage("s1", "assistant", "hi there");
+    try store.saveMessage("s1", "user", "hello", null);
+    try store.saveMessage("s1", "assistant", "hi there", null);
 
     const msgs = try store.loadMessages(allocator, "s1");
     defer root.freeMessages(allocator, msgs);
@@ -1978,7 +2020,7 @@ test "sqlite sessionStore clearMessages" {
     defer mem.deinit();
 
     const store = mem.sessionStore();
-    try store.saveMessage("s1", "user", "hello");
+    try store.saveMessage("s1", "user", "hello", null);
     try store.clearMessages("s1");
 
     const msgs = try store.loadMessages(allocator, "s1");
@@ -2167,9 +2209,9 @@ test "sqlite loadMessages preserves order" {
     var mem = try SqliteMemory.init(std.testing.allocator, ":memory:");
     defer mem.deinit();
 
-    try mem.saveMessage("s1", "user", "first");
-    try mem.saveMessage("s1", "assistant", "second");
-    try mem.saveMessage("s1", "user", "third");
+    try mem.saveMessage("s1", "user", "first", null);
+    try mem.saveMessage("s1", "assistant", "second", null);
+    try mem.saveMessage("s1", "user", "third", null);
 
     const msgs = try mem.loadMessages(std.testing.allocator, "s1");
     defer root.freeMessages(std.testing.allocator, msgs);
@@ -2184,8 +2226,8 @@ test "sqlite clearMessages does not affect other sessions" {
     var mem = try SqliteMemory.init(std.testing.allocator, ":memory:");
     defer mem.deinit();
 
-    try mem.saveMessage("s1", "user", "s1 msg");
-    try mem.saveMessage("s2", "user", "s2 msg");
+    try mem.saveMessage("s1", "user", "s1 msg", null);
+    try mem.saveMessage("s2", "user", "s2 msg", null);
 
     try mem.clearMessages("s1");
 

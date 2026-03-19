@@ -615,6 +615,20 @@ pub fn runTelegramLoop(
                 break :blk route.session_key;
             };
 
+            // System commands — handled directly, no agent involved.
+            if (std.mem.indexOf(u8, trimmed, ":sync") != null) {
+                log.info("[sys] :sync requested for session={s}", .{session_key});
+                const reply_to_id_sys: ?i64 = if (msg.is_group or tg_ptr.reply_in_private) msg.message_id else null;
+                const sync_result = runtime.session_mgr.syncChannel(session_key) catch |err| blk: {
+                    log.warn("[sys] :sync failed: {}", .{err});
+                    break :blk allocator.dupe(u8, "Sync failed.") catch continue;
+                };
+                defer allocator.free(sync_result);
+                log.info("[sys] :sync done: {s}", .{sync_result});
+                tg_ptr.sendMessageWithReply(msg.sender, sync_result, reply_to_id_sys) catch |err| log.err("[sys] send failed: {}", .{err});
+                continue;
+            }
+
             if (enable_parallel) {
                 var handled_in_worker = false;
                 parallel_attempt: {

@@ -515,11 +515,22 @@ pub const LucidMemory = struct {
         return self.local.clearAutoSaved(session_id);
     }
 
+    fn implSessionDeleteMessageById(ptr: *anyopaque, session_id: []const u8, message_id: []const u8) anyerror!void {
+        const self = castSelf(ptr);
+        return self.local.deleteMessageById(session_id, message_id);
+    }
+    fn implSessionLoadMessageIds(ptr: *anyopaque, allocator: std.mem.Allocator, session_id: []const u8) anyerror![][]const u8 {
+        const self = castSelf(ptr);
+        return self.local.loadMessageIds(allocator, session_id);
+    }
+
     const session_vtable = root.SessionStore.VTable{
         .saveMessage = &implSessionSaveMessage,
         .loadMessages = &implSessionLoadMessages,
         .clearMessages = &implSessionClearMessages,
         .clearAutoSaved = &implSessionClearAutoSaved,
+        .deleteMessageById = &implSessionDeleteMessageById,
+        .loadMessageIds = &implSessionLoadMessageIds,
     };
 
     pub fn sessionStore(self: *Self) root.SessionStore {
@@ -945,8 +956,8 @@ test "lucid sessionStore saveMessage + loadMessages roundtrip" {
     defer mem.deinit();
 
     const store = mem.sessionStore();
-    try store.saveMessage("s1", "user", "hello from lucid");
-    try store.saveMessage("s1", "assistant", "hi back");
+    try store.saveMessage("s1", "user", "hello from lucid", null);
+    try store.saveMessage("s1", "assistant", "hi back", null);
 
     const msgs = try store.loadMessages(allocator, "s1");
     defer root.freeMessages(allocator, msgs);

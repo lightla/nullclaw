@@ -27,6 +27,7 @@ const SecurityPolicy = @import("security/policy.zig").SecurityPolicy;
 const streaming = @import("streaming.zig");
 const thread_stacks = @import("thread_stacks.zig");
 const NamedAgentConfig = @import("config_types.zig").NamedAgentConfig;
+const http_util = @import("http_util.zig");
 const log = std.log.scoped(.session);
 const MESSAGE_LOG_MAX_BYTES: usize = 4096;
 const TOKEN_USAGE_LEDGER_FILENAME = "llm_token_usage.jsonl";
@@ -63,6 +64,26 @@ fn detectMemQuery(content: []const u8) ?[]const u8 {
     const query = std.mem.trim(u8, after[0..end], " \t");
     if (query.len == 0) return null;
     return query;
+}
+
+/// Detects `:mem all` in message. Returns true if found.
+fn detectMemAll(content: []const u8) bool {
+    return std.mem.indexOf(u8, content, ":mem all") != null;
+}
+
+/// Detects `:mem last N` in message. Returns N if found, null otherwise.
+fn detectMemLast(content: []const u8) ?usize {
+    const prefix = ":mem last ";
+    const idx = std.mem.indexOf(u8, content, prefix) orelse return null;
+    const after = content[idx + prefix.len..];
+    const end = std.mem.indexOfAny(u8, after, " \t\r\n") orelse after.len;
+    const n_str = std.mem.trim(u8, after[0..end], " \t");
+    return std.fmt.parseUnsigned(usize, n_str, 10) catch null;
+}
+
+/// Detects `:sync` command in message.
+fn detectSync(content: []const u8) bool {
+    return std.mem.indexOf(u8, content, ":sync") != null;
 }
 
 /// Builds enriched content string from already-fetched entries.
@@ -540,6 +561,108 @@ pub const SessionManager = struct {
         session.last_active = std.time.timestamp();
     }
 
+    /// Delete a stored message by its message_id (e.g. Slack ts).
+    pub fn deleteSessionMessage(self: *SessionManager, session_key: []const u8, message_id: []const u8) !void {
+        if (self.session_store) |store| {
+            try store.deleteMessageById(session_key, message_id);
+            log.info("deleted message session={s} message_id={s}", .{ session_key, message_id });
+        }
+    }
+
+    /// Sync stored messages for the current session.
+    /// For Slack sessions: compares against conversations.history and deletes orphaned messages.
+    /// For other channels: clears stored messages with no message_id (stale records).
+    pub fn syncChannel(self: *SessionManager, session_key: []const u8) ![]const u8 {
+        // Try Slack sync first
+        if (std.mem.indexOf(u8, session_key, ":slack:channel:")) |_| {
+            return self.syncSlackImpl(session_key);
+        }
+
+        // Generic sync: remove messages with message_id that are no longer verifiable.
+        // For non-Slack channels, just report stored message stats.
+        if (self.session_store) |store| {
+            const stored_ids = try store.loadMessageIds(self.allocator, session_key);
+            defer {
+                for (stored_ids) |s| self.allocator.free(s);
+                self.allocator.free(stored_ids);
+            }
+            const stored_msgs = try store.loadMessages(self.allocator, session_key);
+            defer memory_mod.freeMessages(self.allocator, stored_msgs);
+            return try std.fmt.allocPrint(
+                self.allocator,
+                "Session has {d} stored messages ({d} with message_id). Slack sync is supported — for other channels, use /new to reset or manually review history.",
+                .{ stored_msgs.len, stored_ids.len },
+            );
+        }
+        return try self.allocator.dupe(u8, "No session store configured.");
+    }
+
+    fn syncSlackImpl(self: *SessionManager, session_key: []const u8) ![]const u8 {
+        const agent_prefix = "agent:";
+        const slack_marker = ":slack:channel:";
+        const after_agent = if (std.mem.startsWith(u8, session_key, agent_prefix))
+            session_key[agent_prefix.len..]
+        else
+            session_key;
+        const slack_idx = std.mem.indexOf(u8, after_agent, slack_marker) orelse return error.NotSlackSession;
+        const account_id = after_agent[0..slack_idx];
+        const channel_id = after_agent[slack_idx + slack_marker.len..];
+
+        var bot_token: ?[]const u8 = null;
+        for (self.config.channels.slack) |sc| {
+            if (std.mem.eql(u8, sc.account_id, account_id)) {
+                bot_token = sc.bot_token;
+                break;
+            }
+        }
+        const token = bot_token orelse return error.NoSlackConfig;
+
+        log.info("sync: fetching Slack history for channel={s} account={s}", .{ channel_id, account_id });
+
+        const url = try std.fmt.allocPrint(self.allocator, "https://slack.com/api/conversations.history?channel={s}&limit=200", .{channel_id});
+        defer self.allocator.free(url);
+        const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{token});
+        defer self.allocator.free(auth_header);
+
+        const resp_body = try http_util.curlGet(self.allocator, url, &.{auth_header}, "30");
+        defer self.allocator.free(resp_body);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, resp_body, .{});
+        defer parsed.deinit();
+
+        var live_ts = std.StringHashMap(void).init(self.allocator);
+        defer live_ts.deinit();
+        if (parsed.value == .object) {
+            if (parsed.value.object.get("messages")) |msgs| {
+                if (msgs == .array) {
+                    for (msgs.array.items) |item| {
+                        if (item != .object) continue;
+                        if (item.object.get("ts")) |ts| {
+                            if (ts == .string) try live_ts.put(ts.string, {});
+                        }
+                    }
+                }
+            }
+        }
+
+        var deleted: usize = 0;
+        if (self.session_store) |store| {
+            const stored_ids = try store.loadMessageIds(self.allocator, session_key);
+            defer {
+                for (stored_ids) |s| self.allocator.free(s);
+                self.allocator.free(stored_ids);
+            }
+            for (stored_ids) |mid| {
+                if (!live_ts.contains(mid)) {
+                    store.deleteMessageById(session_key, mid) catch {};
+                    deleted += 1;
+                }
+            }
+        }
+
+        return try std.fmt.allocPrint(self.allocator, "Sync complete: {d} message(s) removed from history. Slack shows {d} live messages.", .{ deleted, live_ts.count() });
+    }
+
     /// Process a message within a session context and optionally forward text deltas.
     /// Deltas are only emitted when provider streaming is active.
     pub fn processMessageStreaming(
@@ -600,36 +723,68 @@ pub const SessionManager = struct {
             session.agent.stream_ctx = null;
         }
 
-        // :mem <query> — search SQLite history and inject as context for this turn
+        // :mem all / :mem last N / :mem <query> — inject entries as context for this turn
         var mem_enriched: ?[]const u8 = null;
         defer if (mem_enriched) |s| self.allocator.free(s);
-        if (detectMemQuery(content)) |query| {
-            if (session.agent.mem) |mem| {
+        if (session.agent.mem) |mem| {
+            if (detectMemAll(content)) {
+                log.info("mem-all: loading all entries", .{});
+                const entries = mem.list(self.allocator, null, null) catch |err| blk: {
+                    log.warn("mem-all failed: {}", .{err});
+                    break :blk @as([]memory_mod.MemoryEntry, &.{});
+                };
+                defer memory_mod.freeEntries(self.allocator, entries);
+                if (entries.len > 0) {
+                    mem_enriched = buildMemEnrichedContentFromEntries(self.allocator, entries, content);
+                    log.info("mem-all injected {d} entries into prompt", .{entries.len});
+                }
+            } else if (detectMemLast(content)) |n| {
+                log.info("mem-last: loading last {d} entries", .{n});
+                const entries = mem.list(self.allocator, null, session_key) catch |err| blk: {
+                    log.warn("mem-last failed: {}", .{err});
+                    break :blk @as([]memory_mod.MemoryEntry, &.{});
+                };
+                defer memory_mod.freeEntries(self.allocator, entries);
+                const start = if (entries.len > n) entries.len - n else 0;
+                const slice = entries[start..];
+                if (slice.len > 0) {
+                    mem_enriched = buildMemEnrichedContentFromEntries(self.allocator, slice, content);
+                    log.info("mem-last injected {d} entries into prompt", .{slice.len});
+                }
+            } else if (detectMemQuery(content)) |query| {
                 log.info("mem-search query=\"{s}\"", .{query});
                 const entries_const = mem.recall(self.allocator, query, 10, session_key) catch |err| blk: {
                     log.warn("mem-search failed: {}", .{err});
                     break :blk @as([]memory_mod.MemoryEntry, &.{});
                 };
                 defer memory_mod.freeEntries(self.allocator, entries_const);
-                const entries: []const memory_mod.MemoryEntry = entries_const;
-                log.info("mem-search found={d} results", .{entries.len});
-                for (entries, 0..) |e, i| {
-                    const preview = if (e.content.len > 120) e.content[0..120] else e.content;
-                    log.info("mem-search [{d}] score={?d:.2} content=\"{s}\"", .{ i + 1, e.score, preview });
-                }
-                if (entries.len > 0) {
-                    mem_enriched = buildMemEnrichedContentFromEntries(self.allocator, entries, query);
-                    if (mem_enriched != null) {
-                        log.info("mem-search injected {d} entries into prompt", .{entries.len});
-                    }
+                log.info("mem-search found={d} results", .{entries_const.len});
+                if (entries_const.len > 0) {
+                    mem_enriched = buildMemEnrichedContentFromEntries(self.allocator, entries_const, query);
+                    if (mem_enriched != null) log.info("mem-search injected {d} entries into prompt", .{entries_const.len});
                 } else {
                     log.warn("mem-search no results — sending query without context", .{});
                 }
-            } else {
-                log.warn("mem-search triggered but memory backend not configured", .{});
             }
         }
         const effective_content = mem_enriched orelse content;
+
+        // :sync — reconcile stored messages with channel history, return summary directly.
+        if (detectSync(content)) {
+            log.info("sync: starting for session={s}", .{session_key});
+            const sync_summary = self.syncChannel(session_key) catch |err| blk: {
+                log.warn("sync: failed err={}", .{err});
+                break :blk std.fmt.allocPrint(self.allocator, "Sync failed: {s}", .{@errorName(err)}) catch
+                    try self.allocator.dupe(u8, "Sync failed.");
+            };
+            defer self.allocator.free(sync_summary);
+            log.info("sync: done result=\"{s}\"", .{sync_summary});
+            if (self.session_store) |store| {
+                store.saveMessage(session_key, "user", content, null) catch {};
+                store.saveMessage(session_key, "assistant", sync_summary, null) catch {};
+            }
+            return try self.allocator.dupe(u8, sync_summary);
+        }
 
         const response = try session.agent.turn(effective_content);
         session.turn_count += 1;

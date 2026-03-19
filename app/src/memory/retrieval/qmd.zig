@@ -506,7 +506,7 @@ test "parseQmdJson skips entries with no key and no content" {
 const MockSessionStore = struct {
     call_count: usize = 0,
 
-    fn implSaveMessage(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8) anyerror!void {}
+    fn implSaveMessage(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8, _: ?[]const u8) anyerror!void {}
     fn implLoadMessages(ptr: *anyopaque, allocator: std.mem.Allocator, _: []const u8) anyerror![]root.MessageEntry {
         const self: *MockSessionStore = @ptrCast(@alignCast(ptr));
         self.call_count += 1;
@@ -517,12 +517,18 @@ const MockSessionStore = struct {
     }
     fn implClearMessages(_: *anyopaque, _: []const u8) anyerror!void {}
     fn implClearAutoSaved(_: *anyopaque, _: ?[]const u8) anyerror!void {}
+    fn implDeleteMessageById(_: *anyopaque, _: []const u8, _: []const u8) anyerror!void {}
+    fn implLoadMessageIds(_: *anyopaque, allocator: std.mem.Allocator, _: []const u8) anyerror![][]const u8 {
+        return allocator.alloc([]const u8, 0);
+    }
 
     const vtable = root.SessionStore.VTable{
         .saveMessage = &implSaveMessage,
         .loadMessages = &implLoadMessages,
         .clearMessages = &implClearMessages,
         .clearAutoSaved = &implClearAutoSaved,
+        .deleteMessageById = &implDeleteMessageById,
+        .loadMessageIds = &implLoadMessageIds,
     };
 
     fn store(self: *MockSessionStore) root.SessionStore {

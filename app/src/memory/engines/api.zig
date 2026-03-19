@@ -733,11 +733,18 @@ pub const ApiMemory = struct {
         }
     }
 
+    fn implDeleteMessageById(_: *anyopaque, _: []const u8, _: []const u8) anyerror!void {}
+    fn implLoadMessageIds(_: *anyopaque, allocator: std.mem.Allocator, _: []const u8) anyerror![][]const u8 {
+        return allocator.alloc([]const u8, 0);
+    }
+
     const session_vtable = SessionStore.VTable{
         .saveMessage = &implSaveMessage,
         .loadMessages = &implLoadMessages,
         .clearMessages = &implClearMessages,
         .clearAutoSaved = &implClearAutoSaved,
+        .deleteMessageById = &implDeleteMessageById,
+        .loadMessageIds = &implLoadMessageIds,
     };
 };
 
