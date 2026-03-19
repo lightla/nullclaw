@@ -127,3 +127,7 @@ SQLite **không được feed vào gemini-cli**. Chỉ dùng để:
 3. **Context overflow** → khi gemini session quá lớn, reset + inject summary từ SQLite
 
 Chưa implement. Cần thêm section `[BỘ NHỚ DÀI HẠN]` vào `constructFullAwarePrompt`.
+
+
+
+

@@ -103,6 +103,9 @@ pub const Config = struct {
     // Computed paths (not serialized)
     workspace_dir: []const u8,
     config_path: []const u8,
+    /// The CWD when nullclaw was started. Always the actual project directory,
+    /// never overridden by config.json. Used as subprocess CWD for gemini/claude CLI.
+    project_dir: []const u8 = "",
 
     // Top-level fields
     workspace_dir_override: ?[]const u8 = null, // User-specified workspace path (if set, overrides default)
@@ -263,11 +266,16 @@ pub const Config = struct {
         };
         std.debug.print("[nullclaw] config dir: {s}\n", .{config_dir});
         const config_path = try std.fs.path.join(allocator, &.{ config_dir, "config.json" });
-        const default_workspace_dir = try std.fs.path.join(allocator, &.{ config_dir, "workspace" });
+        const default_workspace_dir = std.fs.cwd().realpathAlloc(allocator, ".") catch
+            try std.fs.path.join(allocator, &.{ config_dir, "workspace" });
+
+        const project_dir = std.fs.cwd().realpathAlloc(allocator, ".") catch
+            try allocator.dupe(u8, config_dir);
 
         var cfg = Config{
-            .workspace_dir = default_workspace_dir, // temporarily set to default
+            .workspace_dir = default_workspace_dir, // defaults to CWD, falls back to config_dir/workspace
             .config_path = config_path,
+            .project_dir = project_dir,
             .allocator = allocator,
             .arena = arena_ptr,
         };

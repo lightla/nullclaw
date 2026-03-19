@@ -95,7 +95,7 @@ pub const ClaudeCliProvider = struct {
 
         log.info("{s}[{s}] calling claude resume={}", .{ actor, effective_model, is_resume });
 
-        const res = try runClaudeFinal(allocator, prompt, effective_model, actor, request.gemini_session_cwd, session_id, null, null);
+        const res = try runClaudeFinal(allocator, prompt, effective_model, actor, request.gemini_session_cwd, request.workspace_dir, session_id, null, null);
         defer res.deinit(allocator);
 
         if (!is_resume and !res.capacity_error) {
@@ -105,7 +105,7 @@ pub const ClaudeCliProvider = struct {
         if (res.capacity_error) {
             if (request.fallback_model) |fb_model| {
                 log.warn("{s}[{s}] capacity error, retrying with fallback {s}", .{ actor, effective_model, fb_model });
-                const fb_res = try runClaudeFinal(allocator, prompt, fb_model, actor, request.gemini_session_cwd, session_id, null, null);
+                const fb_res = try runClaudeFinal(allocator, prompt, fb_model, actor, request.gemini_session_cwd, request.workspace_dir, session_id, null, null);
                 defer fb_res.deinit(allocator);
                 if (!is_resume and !fb_res.capacity_error) {
                     if (fb_res.session_id) |id| storeSessionId(request.gemini_session_cwd, id);
@@ -142,7 +142,7 @@ pub const ClaudeCliProvider = struct {
 
         log.info("{s}[{s}] calling claude resume={}", .{ actor, effective_model, is_resume });
 
-        const res = try runClaudeFinal(allocator, prompt, effective_model, actor, request.gemini_session_cwd, session_id, callback, callback_ctx);
+        const res = try runClaudeFinal(allocator, prompt, effective_model, actor, request.gemini_session_cwd, request.workspace_dir, session_id, callback, callback_ctx);
         defer res.deinit(allocator);
 
         if (!is_resume and !res.capacity_error) {
@@ -155,7 +155,7 @@ pub const ClaudeCliProvider = struct {
                 const notice = try std.fmt.allocPrint(allocator, "\n_(Model {s} quá tải, đang thử lại với {s}...)_\n\n", .{ effective_model, fb_model });
                 defer allocator.free(notice);
                 callback(callback_ctx, .{ .delta = notice, .is_final = false, .token_count = 0 });
-                const fb_res = try runClaudeFinal(allocator, prompt, fb_model, actor, request.gemini_session_cwd, session_id, callback, callback_ctx);
+                const fb_res = try runClaudeFinal(allocator, prompt, fb_model, actor, request.gemini_session_cwd, request.workspace_dir, session_id, callback, callback_ctx);
                 defer fb_res.deinit(allocator);
                 if (!is_resume and !fb_res.capacity_error) {
                     if (fb_res.session_id) |id| storeSessionId(request.gemini_session_cwd, id);
@@ -175,6 +175,7 @@ pub const ClaudeCliProvider = struct {
         model_name: []const u8,
         actor_name: []const u8,
         session_cwd: ?[]const u8,
+        workspace_dir: ?[]const u8,
         session_id: ?[]const u8,
         stream_cb: ?StreamCallback,
         cb_ctx: ?*anyopaque,
@@ -201,7 +202,8 @@ pub const ClaudeCliProvider = struct {
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
-        if (session_cwd) |cwd| child.cwd = cwd;
+        const effective_cwd = workspace_dir orelse session_cwd;
+        if (effective_cwd) |cwd| child.cwd = cwd;
 
         child.spawn() catch |err| {
             log.err("{s}[claude] spawn failed (is 'claude' installed?): {}", .{ actor_name, err });
@@ -366,7 +368,7 @@ pub const ClaudeCliProvider = struct {
     fn chatWithSystemImpl(_: *anyopaque, allocator: std.mem.Allocator, system_prompt: ?[]const u8, message: []const u8, model: []const u8, _: f64) anyerror![]const u8 {
         const prompt = if (system_prompt) |s| try std.fmt.allocPrint(allocator, "{s}\n\n{s}", .{ s, message }) else message;
         defer if (system_prompt != null) allocator.free(prompt);
-        const res = try runClaudeFinal(allocator, prompt, model, "system", null, null, null, null);
+        const res = try runClaudeFinal(allocator, prompt, model, "system", null, null, null, null, null);
         defer if (res.session_id) |id| allocator.free(id);
         return res.content;
     }

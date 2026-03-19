@@ -71,14 +71,14 @@ pub const GeminiCliProvider = struct {
 
         log.info("{s}[{s}] calling gemini resume={}", .{ actor, effective_model, is_resume });
 
-        const res = try runGeminiFinal(allocator, prompt, effective_model, actor, request.gemini_session_cwd, is_resume, null, null);
+        const res = try runGeminiFinal(allocator, prompt, effective_model, actor, request.gemini_session_cwd, request.workspace_dir, is_resume, null, null);
         if (!is_resume and !res.capacity_error) markInitialized(request.gemini_session_cwd);
 
         if (res.capacity_error) {
             if (request.fallback_model) |fb_model| {
                 log.warn("{s}[{s}] capacity error, retrying with fallback {s}", .{ actor, effective_model, fb_model });
                 allocator.free(res.content);
-                const fb_res = try runGeminiFinal(allocator, prompt, fb_model, actor, request.gemini_session_cwd, is_resume, null, null);
+                const fb_res = try runGeminiFinal(allocator, prompt, fb_model, actor, request.gemini_session_cwd, request.workspace_dir, is_resume, null, null);
                 if (!is_resume and !fb_res.capacity_error) markInitialized(request.gemini_session_cwd);
                 return ChatResponse{ .content = fb_res.content, .model = try allocator.dupe(u8, fb_model), .usage = fb_res.usage };
             }
@@ -101,7 +101,7 @@ pub const GeminiCliProvider = struct {
 
         log.info("{s}[{s}] calling gemini resume={}", .{ actor, effective_model, is_resume });
 
-        const res = try runGeminiFinal(allocator, prompt, effective_model, actor, request.gemini_session_cwd, is_resume, callback, callback_ctx);
+        const res = try runGeminiFinal(allocator, prompt, effective_model, actor, request.gemini_session_cwd, request.workspace_dir, is_resume, callback, callback_ctx);
         if (!is_resume and !res.capacity_error) markInitialized(request.gemini_session_cwd);
 
         if (res.capacity_error) {
@@ -111,7 +111,7 @@ pub const GeminiCliProvider = struct {
                 const notice = try std.fmt.allocPrint(allocator, "\n_(Model {s} quá tải, đang thử lại với {s}...)_\n\n", .{ effective_model, fb_model });
                 defer allocator.free(notice);
                 callback(callback_ctx, .{ .delta = notice, .is_final = false, .token_count = 0 });
-                const fb_res = try runGeminiFinal(allocator, prompt, fb_model, actor, request.gemini_session_cwd, is_resume, callback, callback_ctx);
+                const fb_res = try runGeminiFinal(allocator, prompt, fb_model, actor, request.gemini_session_cwd, request.workspace_dir, is_resume, callback, callback_ctx);
                 if (!is_resume and !fb_res.capacity_error) markInitialized(request.gemini_session_cwd);
                 callback(callback_ctx, .{ .delta = "", .is_final = true, .token_count = 0 });
                 return StreamChatResult{ .content = fb_res.content, .usage = fb_res.usage };
@@ -128,6 +128,7 @@ pub const GeminiCliProvider = struct {
         model_name: []const u8,
         actor_name: []const u8,
         session_cwd: ?[]const u8,
+        workspace_dir: ?[]const u8,
         resume_session: bool,
         stream_cb: ?StreamCallback,
         cb_ctx: ?*anyopaque,
@@ -152,7 +153,8 @@ pub const GeminiCliProvider = struct {
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe; // captured in stderr_reader thread to detect capacity errors
-        if (session_cwd) |cwd| child.cwd = cwd;
+        const effective_cwd = workspace_dir orelse session_cwd;
+        if (effective_cwd) |cwd| child.cwd = cwd;
         child.spawn() catch |err| {
             log.err("{s}[gemini] spawn failed (is 'gemini' installed?): {}", .{ actor_name, err });
             return err;
@@ -269,7 +271,7 @@ pub const GeminiCliProvider = struct {
     fn chatWithSystemImpl(_: *anyopaque, allocator: std.mem.Allocator, system_prompt: ?[]const u8, message: []const u8, model: []const u8, _: f64) anyerror![]const u8 {
         const prompt = if (system_prompt) |s| try std.fmt.allocPrint(allocator, "{s}\n\n{s}", .{s, message}) else message;
         defer if (system_prompt != null) allocator.free(prompt);
-        const res = try runGeminiFinal(allocator, prompt, model, "system", null, false, null, null);
+        const res = try runGeminiFinal(allocator, prompt, model, "system", null, null, false, null, null);
         return res.content;
     }
     fn supportsNativeToolsImpl(_: *anyopaque) bool { return false; }

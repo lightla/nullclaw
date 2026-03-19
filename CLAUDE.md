@@ -10,11 +10,14 @@ Read `AGENTS.md` before any code change. It is the authoritative engineering pro
 
 ```bash
 # Requires exactly Zig 0.15.2 (verify: zig version)
+# Run all build/test commands from app/
+cd app
 zig build                           # dev build
 zig build -Doptimize=ReleaseSmall   # release build (target: <1 MB binary)
 zig build test --summary all        # run all 3,371+ tests (must pass with 0 leaks)
 zig fmt src/                        # format all source files
 zig fmt --check src/                # check formatting (used by pre-commit hook)
+cp zig-out/bin/nullclaw ../dist/bin/nullclaw  # deploy binary to dist/
 ```
 
 Primary validation command is `zig build test --summary all` (project-wide). Individual files can still be run with `zig test <file>.zig` when needed.

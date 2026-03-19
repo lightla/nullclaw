@@ -1,3 +1,6 @@
+export NULLCLAW_HOME=".../nullclaw/dist"
+export PATH="$NULLCLAW_HOME/bin:$PATH"
+
 
                                                                                                                       
 ❯ ok tức là con số token đó ko tốn tiền, đúng chưa, và đó vẫn là token mà claude cli phải nạp vào context và tính     

@@ -257,6 +257,8 @@ pub const Agent = struct {
     model_fallbacks: []const config_types.ModelFallbackEntry = &.{},
     temperature: f64,
     workspace_dir: []const u8,
+    /// CWD when nullclaw started — used as subprocess CWD for gemini/claude CLI.
+    project_dir: []const u8 = "",
     allowed_paths: []const []const u8 = &.{},
     multimodal_unrestricted: bool = false,
     /// List of models that do not support image/vision input.
@@ -419,6 +421,7 @@ pub const Agent = struct {
             .model_fallbacks = cfg.reliability.model_fallbacks,
             .temperature = cfg.default_temperature,
             .workspace_dir = cfg.workspace_dir,
+            .project_dir = cfg.project_dir,
             .allowed_paths = cfg.autonomy.allowed_paths,
             .multimodal_unrestricted = cfg.autonomy.level == .yolo,
             .vision_disabled_models = cfg.agent.vision_disabled_models,
@@ -1164,6 +1167,7 @@ pub const Agent = struct {
                         .timeout_secs = self.message_timeout_secs,
                         .reasoning_effort = self.reasoning_effort,
                         .gemini_session_cwd = self.gemini_session_cwd,
+                        .workspace_dir = if (self.project_dir.len > 0) self.project_dir else self.workspace_dir,
                         .actor_name = self.actor_name,
                         .fallback_model = self.fallback_model,
                     },
@@ -1241,6 +1245,7 @@ pub const Agent = struct {
                         .timeout_secs = self.message_timeout_secs,
                         .reasoning_effort = self.reasoning_effort,
                         .gemini_session_cwd = self.gemini_session_cwd,
+                        .workspace_dir = if (self.project_dir.len > 0) self.project_dir else self.workspace_dir,
                         .actor_name = self.actor_name,
                         .fallback_model = self.fallback_model,
                     },
