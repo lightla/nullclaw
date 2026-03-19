@@ -1,3 +1,52 @@
+Sau tất cả các fix:
+
+Config:
+
+workspace_dir = dist/workspace/ → nơi nullclaw lưu file nội bộ (memory.db, SOUL.md...)
+project_dir = CWD lúc chạy nullclaw gateway → không bao giờ bị override bởi config.json
+Subprocess (gemini/claude CLI):
+
+CWD = project_dir (project mày đang làm)
+Giống hệt gõ thẳng gemini hay claude tại folder project
+Session isolation:
+
+Gemini: dùng CWD = project → sessions gắn với project, các agent (dev/mentor) share session của cùng project — giống chạy thẳng từ project
+Claude: dùng --resume <session_id> → CWD không ảnh hưởng session, vẫn isolated per conversation
+System prompt:
+
+"Working directory" = project_dir → agent biết đúng project
+:mem commands:
+
+:mem all → inject toàn bộ memory vào context
+:mem last N → inject N entries cuối
+:mem <query> → search + inject kết quả
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # Gemini CLI Session Management
 
 ## Cách hoạt động
