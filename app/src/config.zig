@@ -4514,6 +4514,7 @@ test "parse actor config supports top-level sys slack account" {
         \\        "account_id": "auto-detect",
         \\        "mode": "socket",
         \\        "bot_token": "xoxb-sys",
+        \\        "user_token": "xoxp-sys",
         \\        "app_token": "xapp-sys",
         \\        "allow_from": ["*"]
         \\      }
@@ -4535,6 +4536,7 @@ test "parse actor config supports top-level sys slack account" {
     try std.testing.expect(cfg.channels.slack[0].system_only);
     try std.testing.expectEqualStrings("sys", cfg.channels.slack[0].agent_id.?);
     try std.testing.expectEqualStrings("xoxb-sys", cfg.channels.slack[0].bot_token);
+    try std.testing.expectEqualStrings("xoxp-sys", cfg.channels.slack[0].user_token.?);
 }
 
 test "NostrConfig dm_relays default is auth.nostr1.com" {

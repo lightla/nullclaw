@@ -763,7 +763,8 @@ pub const SessionManager = struct {
     const SlackSessionTarget = struct {
         account_id: []const u8,
         channel_id: []const u8,
-        bot_token: []const u8,
+        api_token: []const u8,
+        token_kind: []const u8,
     };
 
     fn slackTargetForAccount(
@@ -776,7 +777,8 @@ pub const SessionManager = struct {
             return .{
                 .account_id = sc.account_id,
                 .channel_id = channel_id,
-                .bot_token = sc.bot_token,
+                .api_token = sc.user_token orelse sc.bot_token,
+                .token_kind = if (sc.user_token != null) "user" else "bot",
             };
         }
         return error.NoSlackConfig;
@@ -862,7 +864,7 @@ pub const SessionManager = struct {
 
         const url = try std.fmt.allocPrint(self.allocator, "https://slack.com/api/conversations.history?channel={s}&limit=200", .{target.channel_id});
         defer self.allocator.free(url);
-        const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{target.bot_token});
+        const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{target.api_token});
         defer self.allocator.free(auth_header);
 
         const resp_body = try http_util.curlGet(self.allocator, url, &.{auth_header}, "30");
@@ -918,7 +920,7 @@ pub const SessionManager = struct {
         var cursor: ?[]u8 = null;
         defer if (cursor) |c| self.allocator.free(c);
 
-        const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{target.bot_token});
+        const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{target.api_token});
         defer self.allocator.free(auth_header);
 
         while (true) {
@@ -993,7 +995,7 @@ pub const SessionManager = struct {
 
     fn deleteSlackMessageByTs(self: *SessionManager, target: SlackSessionTarget, message_ts: []const u8) !bool {
         const url = "https://slack.com/api/chat.delete";
-        const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{target.bot_token});
+        const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{target.api_token});
         defer self.allocator.free(auth_header);
         const body = try std.fmt.allocPrint(
             self.allocator,
@@ -1026,7 +1028,10 @@ pub const SessionManager = struct {
         directive: DeleteDirective,
     ) ![]const u8 {
         const target = try self.slackTargetForAccount(account_id, channel_id);
-        log.info("delete: fetching Slack history for channel={s} account={s}", .{ target.channel_id, target.account_id });
+        log.info(
+            "delete: fetching Slack history for channel={s} account={s} token_kind={s}",
+            .{ target.channel_id, target.account_id, target.token_kind },
+        );
 
         const targets = try self.collectSlackDeletionTargets(target, directive);
         defer {

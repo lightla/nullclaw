@@ -7,6 +7,7 @@
         "account_id": "auto-detect",
         "mode": "socket",
         "bot_token": "xoxb-10679218407473-10770109945200-wEnMcUzA93Zwd5Iu7YvsxyG8",
+        "user_token": "xoxp-10679218407473-10666302934114-10770490537008-fbabfee9e8efdf820425c916318b1eee",
         "app_token": "xapp-1-A0AMRRFQVRU-10726480502359-1b52d98384424c455701d0b42b3ca6bbfe8793095447603dbabaeed47928330f",
         "signing_secret": null,
         "webhook_path": "/slack/events",

@@ -284,6 +284,8 @@ pub const SlackConfig = struct {
     system_only: bool = false,
     mode: SlackReceiveMode = .socket,
     bot_token: []const u8,
+    /// Optional admin/user token (xoxp-...) used for privileged actions such as bulk deletes.
+    user_token: ?[]const u8 = null,
     app_token: ?[]const u8 = null,
     signing_secret: ?[]const u8 = null,
     webhook_path: []const u8 = "/slack/events",

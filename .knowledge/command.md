@@ -38,8 +38,8 @@ Hi
 :sync 
 // mỗi actor tự động sync data trong sqllite riêng (mem riêng)
 
-# Del (lệnh xóa message trong slack, cần có `sys.channels.slack` trong actor.config.json)
-:del 30 
+# Del (lệnh xóa message trong slack, `sys.channels.slack.user_token` sẽ được ưu tiên nếu có)
+:del 30
 :del all
 
 # Call actor (Subprocess - spawn process)

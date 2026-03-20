@@ -1844,6 +1844,11 @@ fn parseActorSlackChannelConfig(
             slack_cfg.mode = .http;
         }
     }
+    if (slack_val.object.get("user_token")) |v| {
+        if (v == .string and v.string.len > 0) {
+            slack_cfg.user_token = try self.allocator.dupe(u8, v.string);
+        }
+    }
     if (slack_val.object.get("app_token")) |v| {
         if (v == .string) slack_cfg.app_token = try self.allocator.dupe(u8, v.string);
     }
