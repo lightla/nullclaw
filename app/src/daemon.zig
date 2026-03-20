@@ -7,6 +7,7 @@
 //!   - Ctrl+C graceful shutdown
 
 const std = @import("std");
+const builtin = @import("builtin");
 const health = @import("health.zig");
 const Config = @import("config.zig").Config;
 const CronScheduler = @import("cron.zig").CronScheduler;
@@ -22,6 +23,7 @@ const heartbeat_mod = @import("heartbeat.zig");
 const memory_mod = @import("memory/root.zig");
 const bootstrap_mod = @import("bootstrap/root.zig");
 const onboard = @import("onboard.zig");
+const session_mod = @import("session.zig");
 const streaming = @import("streaming.zig");
 const thread_stacks = @import("thread_stacks.zig");
 const ConversationContext = @import("agent/prompt.zig").ConversationContext;
@@ -827,21 +829,34 @@ fn inboundMsgWorker(ctx: *InboundMsgWorkerCtx) void {
     };
 
     // System commands — handled directly, no agent involved.
-    if (std.mem.indexOf(u8, msg.content, ":sync") != null) {
-        log.info("[sys] :sync requested session={s}", .{session_key});
+    if (session_mod.isSyncCommand(msg.content)) {
+        log.info("[sys] sync requested session={s} command={f}", .{ session_key, std.json.fmt(msg.content, .{}) });
         const sync_result = runtime.session_mgr.syncChannel(session_key) catch |err| blk: {
             log.warn("[sys] :sync failed: {}", .{err});
             break :blk allocator.dupe(u8, "Sync failed.") catch return;
         };
         defer allocator.free(sync_result);
-        log.info("[sys] :sync done: {s}", .{sync_result});
-        const out = (if (outbound_account_id) |aid|
-            bus_mod.makeOutboundWithAccount(allocator, msg.channel, aid, msg.chat_id, sync_result)
-        else
-            bus_mod.makeOutbound(allocator, msg.channel, msg.chat_id, sync_result)) catch return;
-        event_bus.publishOutbound(out) catch {
-            out.deinit(allocator);
-        };
+        log.info("[sys] sync done: {s}", .{sync_result});
+        if (!builtin.is_test) {
+            std.debug.print(
+                "[sync] session={s} command={f} slack_reply_suppressed={} result={f}\n",
+                .{
+                    session_key,
+                    std.json.fmt(msg.content, .{}),
+                    std.mem.eql(u8, msg.channel, "slack"),
+                    std.json.fmt(sync_result, .{}),
+                },
+            );
+        }
+        if (!std.mem.eql(u8, msg.channel, "slack")) {
+            const out = (if (outbound_account_id) |aid|
+                bus_mod.makeOutboundWithAccount(allocator, msg.channel, aid, msg.chat_id, sync_result)
+            else
+                bus_mod.makeOutbound(allocator, msg.channel, msg.chat_id, sync_result)) catch return;
+            event_bus.publishOutbound(out) catch {
+                out.deinit(allocator);
+            };
+        }
         return;
     }
 
@@ -863,6 +878,13 @@ fn inboundMsgWorker(ctx: *InboundMsgWorkerCtx) void {
             log.warn("inbound record-only failed: {}", .{err});
         };
         return;
+    }
+
+    if (std.mem.eql(u8, msg.channel, "slack")) {
+        if (runtime.session_mgr.stageMemoryDirectiveSilently(session_key, msg.content, conv_ctx)) {
+            log.info("[sys] silent mem directive staged for session={s}", .{session_key});
+            return;
+        }
     }
 
     const reply = runtime.session_mgr.processMessageStreaming(

@@ -9,6 +9,7 @@
 //! sessions are processed in parallel.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Config = @import("config.zig").Config;
 const Agent = @import("agent/root.zig").Agent;
@@ -53,32 +54,60 @@ fn applyNamedAgentConfig(allocator: Allocator, agent: *Agent, named: NamedAgentC
     return true;
 }
 
-/// Detects `:mem <query>` anywhere in a message.
-/// Returns the query string (trimmed text after `:mem`), null if not found.
-fn detectMemQuery(content: []const u8) ?[]const u8 {
+const MemDirective = union(enum) {
+    all,
+    last: usize,
+    query: []const u8,
+};
+
+fn parseMemDirectiveBody(body: []const u8) ?MemDirective {
+    const trimmed = std.mem.trim(u8, body, " \t");
+    if (trimmed.len == 0) return null;
+
+    if (std.ascii.eqlIgnoreCase(trimmed, "all")) return .all;
+
+    if (trimmed.len > 4 and std.ascii.eqlIgnoreCase(trimmed[0..4], "last")) {
+        const separator = trimmed[4];
+        if (separator == ' ' or separator == '\t') {
+            const n_str = std.mem.trim(u8, trimmed[5..], " \t");
+            const n = std.fmt.parseUnsigned(usize, n_str, 10) catch return null;
+            return .{ .last = n };
+        }
+    }
+
+    return .{ .query = trimmed };
+}
+
+/// Parses standalone memory directives:
+///   - `mem: all`
+///   - `mem: last 10`
+///   - `mem: docker issue`
+///   - legacy `:mem ...`
+fn parseStandaloneMemDirective(content: []const u8) ?MemDirective {
+    const trimmed = std.mem.trim(u8, content, " \t\r\n");
+
+    if (std.mem.startsWith(u8, trimmed, "mem:")) {
+        return parseMemDirectiveBody(trimmed["mem:".len..]);
+    }
+
+    if (!std.mem.startsWith(u8, trimmed, ":mem")) return null;
+    const after = trimmed[":mem".len..];
+    if (after.len == 0) return null;
+    if (after[0] != ' ' and after[0] != '\t') return null;
+    return parseMemDirectiveBody(after[1..]);
+}
+
+/// Legacy compatibility for inline `:mem ...` directives embedded in a message.
+fn parseInlineLegacyMemDirective(content: []const u8) ?MemDirective {
     const prefix = ":mem ";
     const idx = std.mem.indexOf(u8, content, prefix) orelse return null;
-    const after = content[idx + prefix.len..];
-    // Take until end of line (or end of string)
+    const after = content[idx + prefix.len ..];
     const end = std.mem.indexOfAny(u8, after, "\r\n") orelse after.len;
-    const query = std.mem.trim(u8, after[0..end], " \t");
-    if (query.len == 0) return null;
-    return query;
+    return parseMemDirectiveBody(after[0..end]);
 }
 
-/// Detects `:mem all` in message. Returns true if found.
-fn detectMemAll(content: []const u8) bool {
-    return std.mem.indexOf(u8, content, ":mem all") != null;
-}
-
-/// Detects `:mem last N` in message. Returns N if found, null otherwise.
-fn detectMemLast(content: []const u8) ?usize {
-    const prefix = ":mem last ";
-    const idx = std.mem.indexOf(u8, content, prefix) orelse return null;
-    const after = content[idx + prefix.len..];
-    const end = std.mem.indexOfAny(u8, after, " \t\r\n") orelse after.len;
-    const n_str = std.mem.trim(u8, after[0..end], " \t");
-    return std.fmt.parseUnsigned(usize, n_str, 10) catch null;
+fn detectMemDirective(content: []const u8) ?MemDirective {
+    return parseStandaloneMemDirective(content) orelse parseInlineLegacyMemDirective(content);
 }
 
 /// Detects `:sync` command in message.
@@ -86,20 +115,89 @@ fn detectSync(content: []const u8) bool {
     return std.mem.indexOf(u8, content, ":sync") != null;
 }
 
-/// Builds enriched content string from already-fetched entries.
-/// Caller owns the returned slice. Returns null on error.
-fn buildMemEnrichedContentFromEntries(allocator: Allocator, entries: []const memory_mod.MemoryEntry, query: []const u8) ?[]const u8 {
+pub fn isSyncCommand(content: []const u8) bool {
+    return detectSync(content);
+}
+
+/// Builds memory context from already-fetched entries.
+/// Internal autosave/hygiene/bootstrap entries are filtered out.
+/// Caller owns the returned slice. Returns null when nothing visible remains.
+fn buildMemContextFromEntries(allocator: Allocator, entries: []const memory_mod.MemoryEntry) ?[]const u8 {
     var buf = std.ArrayListUnmanaged(u8).empty;
     errdefer buf.deinit(allocator);
 
     buf.appendSlice(allocator, "[BỘ NHỚ LIÊN QUAN TỪ LỊCH SỬ]\n") catch return null;
+    var visible_count: usize = 0;
     for (entries) |e| {
+        if (memory_mod.isInternalMemoryEntryKeyOrContent(e.key, e.content)) continue;
         std.fmt.format(buf.writer(allocator), "- {s}\n", .{e.content}) catch continue;
+        visible_count += 1;
     }
-    buf.appendSlice(allocator, "\n") catch return null;
-    buf.appendSlice(allocator, query) catch return null;
+    if (visible_count == 0) return null;
 
     return buf.toOwnedSlice(allocator) catch null;
+}
+
+/// Builds enriched content string from already-fetched entries.
+/// Caller owns the returned slice. Returns null on error or when nothing visible remains.
+fn buildMemEnrichedContentFromEntries(allocator: Allocator, entries: []const memory_mod.MemoryEntry, query: []const u8) ?[]const u8 {
+    const context = buildMemContextFromEntries(allocator, entries) orelse return null;
+    defer allocator.free(context);
+
+    return std.fmt.allocPrint(allocator, "{s}\n{s}", .{ context, query }) catch null;
+}
+
+fn buildMemDirectiveContext(
+    allocator: Allocator,
+    mem: Memory,
+    session_key: []const u8,
+    directive: MemDirective,
+) ?[]const u8 {
+    switch (directive) {
+        .all => {
+            const entries = mem.list(allocator, null, null) catch return null;
+            defer memory_mod.freeEntries(allocator, entries);
+            return buildMemContextFromEntries(allocator, entries);
+        },
+        .last => |n| {
+            const entries = mem.list(allocator, null, session_key) catch return null;
+            defer memory_mod.freeEntries(allocator, entries);
+            const start = if (entries.len > n) entries.len - n else 0;
+            return buildMemContextFromEntries(allocator, entries[start..]);
+        },
+        .query => |query| {
+            const entries = mem.recall(allocator, query, 10, session_key) catch return null;
+            defer memory_mod.freeEntries(allocator, entries);
+            return buildMemContextFromEntries(allocator, entries);
+        },
+    }
+}
+
+fn buildMemDirectiveEnrichedContent(
+    allocator: Allocator,
+    mem: Memory,
+    session_key: []const u8,
+    raw_content: []const u8,
+    directive: MemDirective,
+) ?[]const u8 {
+    switch (directive) {
+        .all => {
+            const entries = mem.list(allocator, null, null) catch return null;
+            defer memory_mod.freeEntries(allocator, entries);
+            return buildMemEnrichedContentFromEntries(allocator, entries, raw_content);
+        },
+        .last => |n| {
+            const entries = mem.list(allocator, null, session_key) catch return null;
+            defer memory_mod.freeEntries(allocator, entries);
+            const start = if (entries.len > n) entries.len - n else 0;
+            return buildMemEnrichedContentFromEntries(allocator, entries[start..], raw_content);
+        },
+        .query => |query| {
+            const entries = mem.recall(allocator, query, 10, session_key) catch return null;
+            defer memory_mod.freeEntries(allocator, entries);
+            return buildMemEnrichedContentFromEntries(allocator, entries, query);
+        },
+    }
 }
 
 fn messageLogPreview(text: []const u8) struct { slice: []const u8, truncated: bool } {
@@ -107,6 +205,14 @@ fn messageLogPreview(text: []const u8) struct { slice: []const u8, truncated: bo
         return .{ .slice = text, .truncated = false };
     }
     return .{ .slice = text[0..MESSAGE_LOG_MAX_BYTES], .truncated = true };
+}
+
+fn emitSilentMemDirectiveTrace(session_key: []const u8, content: []const u8, staged_context: bool) void {
+    if (builtin.is_test) return;
+    std.debug.print(
+        "[mem] session={s} command={f} slack_reply=suppressed context_staged={}\n",
+        .{ session_key, std.json.fmt(content, .{}), staged_context },
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -538,7 +644,7 @@ pub const SessionManager = struct {
 
         // 1. Add to in-memory history (for immediate context in next turn)
         try session.agent.recordUserMessage(content);
-        
+
         // 2. Persist to SQLite
         if (self.session_store) |store| {
             const message_id = if (conversation_context) |ctx| ctx.message_id else null;
@@ -557,8 +663,56 @@ pub const SessionManager = struct {
                 }
             }
         }
-        
+
         session.last_active = std.time.timestamp();
+    }
+
+    /// Stage a standalone `mem:`/`:mem` directive into session history without
+    /// calling the LLM or auto-saving an assistant reply. Returns true when the
+    /// message was recognized as a memory directive, even if no visible entries
+    /// were found after filtering internal memory rows.
+    pub fn stageMemoryDirectiveSilently(
+        self: *SessionManager,
+        session_key: []const u8,
+        content: []const u8,
+        _: ?ConversationContext,
+    ) bool {
+        const directive = parseStandaloneMemDirective(content) orelse return false;
+        const session = self.getOrCreate(session_key) catch |err| {
+            log.warn("silent mem directive session init failed: {}", .{err});
+            return true;
+        };
+
+        session.mutex.lock();
+        defer session.mutex.unlock();
+
+        var staged_context = false;
+        if (session.agent.mem) |mem| {
+            const context = buildMemDirectiveContext(self.allocator, mem, session_key, directive);
+            defer if (context) |ctx| self.allocator.free(ctx);
+
+            if (context) |ctx| {
+                staged_context = true;
+                session.agent.history.append(self.allocator, .{
+                    .role = .user,
+                    .content = self.allocator.dupe(u8, ctx) catch {
+                        log.warn("silent mem directive history dupe failed", .{});
+                        session.last_active = std.time.timestamp();
+                        emitSilentMemDirectiveTrace(session_key, content, false);
+                        return true;
+                    },
+                }) catch |err| {
+                    log.warn("silent mem directive history append failed: {}", .{err});
+                    session.last_active = std.time.timestamp();
+                    emitSilentMemDirectiveTrace(session_key, content, false);
+                    return true;
+                };
+            }
+        }
+
+        session.last_active = std.time.timestamp();
+        emitSilentMemDirectiveTrace(session_key, content, staged_context);
+        return true;
     }
 
     /// Delete a stored message by its message_id (e.g. Slack ts).
@@ -606,7 +760,7 @@ pub const SessionManager = struct {
             session_key;
         const slack_idx = std.mem.indexOf(u8, after_agent, slack_marker) orelse return error.NotSlackSession;
         const account_id = after_agent[0..slack_idx];
-        const channel_id = after_agent[slack_idx + slack_marker.len..];
+        const channel_id = after_agent[slack_idx + slack_marker.len ..];
 
         var bot_token: ?[]const u8 = null;
         for (self.config.channels.slack) |sc| {
@@ -723,47 +877,24 @@ pub const SessionManager = struct {
             session.agent.stream_ctx = null;
         }
 
-        // :mem all / :mem last N / :mem <query> — inject entries as context for this turn
+        // `mem: ...` / `:mem ...` — inject entries as context for this turn
         var mem_enriched: ?[]const u8 = null;
         defer if (mem_enriched) |s| self.allocator.free(s);
-        if (session.agent.mem) |mem| {
-            if (detectMemAll(content)) {
-                log.info("mem-all: loading all entries", .{});
-                const entries = mem.list(self.allocator, null, null) catch |err| blk: {
-                    log.warn("mem-all failed: {}", .{err});
-                    break :blk @as([]memory_mod.MemoryEntry, &.{});
-                };
-                defer memory_mod.freeEntries(self.allocator, entries);
-                if (entries.len > 0) {
-                    mem_enriched = buildMemEnrichedContentFromEntries(self.allocator, entries, content);
-                    log.info("mem-all injected {d} entries into prompt", .{entries.len});
-                }
-            } else if (detectMemLast(content)) |n| {
-                log.info("mem-last: loading last {d} entries", .{n});
-                const entries = mem.list(self.allocator, null, session_key) catch |err| blk: {
-                    log.warn("mem-last failed: {}", .{err});
-                    break :blk @as([]memory_mod.MemoryEntry, &.{});
-                };
-                defer memory_mod.freeEntries(self.allocator, entries);
-                const start = if (entries.len > n) entries.len - n else 0;
-                const slice = entries[start..];
-                if (slice.len > 0) {
-                    mem_enriched = buildMemEnrichedContentFromEntries(self.allocator, slice, content);
-                    log.info("mem-last injected {d} entries into prompt", .{slice.len});
-                }
-            } else if (detectMemQuery(content)) |query| {
-                log.info("mem-search query=\"{s}\"", .{query});
-                const entries_const = mem.recall(self.allocator, query, 10, session_key) catch |err| blk: {
-                    log.warn("mem-search failed: {}", .{err});
-                    break :blk @as([]memory_mod.MemoryEntry, &.{});
-                };
-                defer memory_mod.freeEntries(self.allocator, entries_const);
-                log.info("mem-search found={d} results", .{entries_const.len});
-                if (entries_const.len > 0) {
-                    mem_enriched = buildMemEnrichedContentFromEntries(self.allocator, entries_const, query);
-                    if (mem_enriched != null) log.info("mem-search injected {d} entries into prompt", .{entries_const.len});
-                } else {
-                    log.warn("mem-search no results — sending query without context", .{});
+        if (!detectSync(content)) {
+            if (session.agent.mem) |mem| {
+                if (detectMemDirective(content)) |directive| {
+                    switch (directive) {
+                        .all => log.info("mem-all: loading all entries", .{}),
+                        .last => |n| log.info("mem-last: loading last {d} entries", .{n}),
+                        .query => |query| log.info("mem-search query=\"{s}\"", .{query}),
+                    }
+
+                    mem_enriched = buildMemDirectiveEnrichedContent(self.allocator, mem, session_key, content, directive);
+                    if (mem_enriched != null) {
+                        log.info("mem directive injected filtered context into prompt", .{});
+                    } else {
+                        log.info("mem directive produced no visible entries after filtering", .{});
+                    }
                 }
             }
         }
@@ -1478,6 +1609,37 @@ test "processMessage returns mock response" {
     const resp = try sm.processMessage("user:1", "hi", null);
     defer testing.allocator.free(resp);
     try testing.expectEqualStrings("Hello from mock", resp);
+}
+
+test "stageMemoryDirectiveSilently filters internal entries and skips provider turn" {
+    var mock = MockProvider{ .response = "should not be used" };
+    const cfg = testConfig();
+
+    var sqlite_mem = try memory_mod.SqliteMemory.init(testing.allocator, ":memory:");
+    defer sqlite_mem.deinit();
+    const mem = sqlite_mem.memory();
+
+    try mem.store("visible_fact", "Visible memory", .core, null);
+    try mem.store("autosave_user_1", "hidden autosave", .conversation, null);
+    try mem.store("last_hygiene_at", "1772051598", .core, null);
+
+    var sm = testSessionManagerWithMemory(
+        testing.allocator,
+        &mock,
+        &cfg,
+        mem,
+        sqlite_mem.sessionStore(),
+    );
+    defer sm.deinit();
+
+    try testing.expect(sm.stageMemoryDirectiveSilently("mem:silent", "mem: all", null));
+
+    const session = try sm.getOrCreate("mem:silent");
+    try testing.expectEqual(@as(u64, 0), session.turn_count);
+    try testing.expectEqual(@as(usize, 1), session.agent.historyLen());
+    try testing.expect(std.mem.indexOf(u8, session.agent.history.items[0].content, "Visible memory") != null);
+    try testing.expect(std.mem.indexOf(u8, session.agent.history.items[0].content, "hidden autosave") == null);
+    try testing.expect(std.mem.indexOf(u8, session.agent.history.items[0].content, "last_hygiene_at") == null);
 }
 
 test "processMessageStreaming forwards provider deltas" {

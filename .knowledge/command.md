@@ -19,3 +19,19 @@ nullclaw workspace append
 
 -- sửa .envrc cần chạy 
 direnv allow 
+
+
+## SLACK COMMAND 
+
+# Search and add context to agent
+:mem all
+:mem last 30
+:mem <search>
+
+# Sync 
+:sync 
+
+# Call actor (Subprocess - spawn process)
+/<actor-name>
+EX: /dev, /mentor, /cdev, /cmentor
+

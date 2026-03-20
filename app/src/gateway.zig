@@ -11,6 +11,7 @@
 //! Uses std.http.Server (built-in, no external deps).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const health = @import("health.zig");
 const Config = @import("config.zig").Config;
@@ -30,6 +31,7 @@ const PairingGuard = @import("security/pairing.zig").PairingGuard;
 const channels = @import("channels/root.zig");
 const bus_mod = @import("bus.zig");
 const ConversationContext = @import("agent/prompt.zig").ConversationContext;
+const log = std.log.scoped(.gateway);
 
 /// Maximum request body size (64KB) — prevents memory exhaustion.
 pub const MAX_BODY_SIZE: usize = 65_536;
@@ -2189,6 +2191,29 @@ fn handleSlackWebhookRoute(ctx: *WebhookHandlerContext) void {
             .bot_name = slack_cfg.bot_name,
             .participants = participants,
         };
+        if (session_mod.isSyncCommand(text)) {
+            log.info("[sys] slack sync requested session={s} command={f}", .{ sk, std.json.fmt(text, .{}) });
+            const sync_result = sm.syncChannel(sk) catch |err| blk: {
+                log.warn("[sys] slack sync failed: {}", .{err});
+                break :blk null;
+            };
+            if (sync_result) |result| {
+                defer ctx.root_allocator.free(result);
+                log.info("[sys] slack sync done: {s}", .{result});
+                if (!builtin.is_test) {
+                    std.debug.print(
+                        "[sync] session={s} command={f} slack_reply_suppressed=true result={f}\n",
+                        .{ sk, std.json.fmt(text, .{}), std.json.fmt(result, .{}) },
+                    );
+                }
+            }
+            ctx.response_body = "{\"status\":\"ok\"}";
+            return;
+        }
+        if (sm.stageMemoryDirectiveSilently(sk, text, conv_ctx)) {
+            ctx.response_body = "{\"status\":\"ok\"}";
+            return;
+        }
         const reply: ?[]const u8 = sm.processMessage(sk, text, conv_ctx) catch |err| blk: {
             var outbound_ch = channels.slack.SlackChannel.initFromConfig(ctx.req_allocator, slack_cfg.*);
             outbound_ch.sendMessage(channel_id, userFacingAgentError(err)) catch {};

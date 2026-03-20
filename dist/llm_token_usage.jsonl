@@ -140,3 +140,8 @@
 {"ts":1773912006,"provider":"claude-cli","model":"claude-sonnet-4-5","prompt_tokens":73786,"completion_tokens":1758,"total_tokens":75544,"success":true}
 {"ts":1773912426,"provider":"claude-cli","model":"claude-sonnet-4-5","prompt_tokens":27891,"completion_tokens":522,"total_tokens":28413,"success":true}
 {"ts":1773912430,"provider":"claude-cli","model":"claude-opus-4-6","prompt_tokens":56031,"completion_tokens":892,"total_tokens":56923,"success":true}
+{"ts":1773980006,"provider":"gemini-cli","model":"gemini-3-flash-preview","prompt_tokens":0,"completion_tokens":0,"total_tokens":13484,"success":true}
+{"ts":1773980078,"provider":"claude-cli","model":"claude-opus-4-6","prompt_tokens":20748,"completion_tokens":5,"total_tokens":20753,"success":true}
+{"ts":1773980079,"provider":"claude-cli","model":"claude-sonnet-4-5","prompt_tokens":28691,"completion_tokens":221,"total_tokens":28912,"success":true}
+{"ts":1773980214,"provider":"claude-cli","model":"claude-sonnet-4-5","prompt_tokens":29838,"completion_tokens":583,"total_tokens":30421,"success":true}
+{"ts":1773980274,"provider":"gemini-cli","model":"gemini-3.1-pro-preview","prompt_tokens":0,"completion_tokens":0,"total_tokens":16233,"success":true}
