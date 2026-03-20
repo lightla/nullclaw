@@ -2191,6 +2191,24 @@ fn handleSlackWebhookRoute(ctx: *WebhookHandlerContext) void {
             .bot_name = slack_cfg.bot_name,
             .participants = participants,
         };
+        if (session_mod.isHelpCommand(text)) {
+            if (!session_mod.shouldHandleSlackHelp(cfg, slack_cfg.account_id)) {
+                ctx.response_body = "{\"status\":\"ok\"}";
+                return;
+            }
+            const help_text = session_mod.loadHelpMessage(ctx.root_allocator, cfg) catch |err| blk: {
+                log.warn("[sys] slack help failed: {}", .{err});
+                break :blk null;
+            };
+            if (help_text) |result| {
+                defer ctx.root_allocator.free(result);
+                log.info("[sys] slack help requested account={s} command={f}", .{ slack_cfg.account_id, std.json.fmt(text, .{}) });
+                var outbound_ch = channels.slack.SlackChannel.initFromConfig(ctx.req_allocator, slack_cfg.*);
+                outbound_ch.sendMessage(channel_id, result) catch {};
+            }
+            ctx.response_body = "{\"status\":\"ok\"}";
+            return;
+        }
         if (session_mod.isSyncCommand(text)) {
             if (slack_cfg.system_only) {
                 ctx.response_body = "{\"status\":\"ok\"}";

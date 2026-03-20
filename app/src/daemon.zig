@@ -958,6 +958,28 @@ fn inboundMsgWorker(ctx: *InboundMsgWorkerCtx) void {
         session_mod.isSystemOnlySlackAccount(runtime.config, outbound_account_id);
 
     // System commands — handled directly, no agent involved.
+    if (session_mod.isHelpCommand(msg.content)) {
+        if (!session_mod.shouldHandleSlackHelp(runtime.config, outbound_account_id)) {
+            return;
+        }
+
+        const help_text = session_mod.loadHelpMessage(allocator, runtime.config) catch |err| blk: {
+            log.warn("[sys] :help failed to load help text: {}", .{err});
+            break :blk allocator.dupe(u8, "Help unavailable.") catch return;
+        };
+        defer allocator.free(help_text);
+
+        log.info("[sys] help requested account={s} command={f}", .{ outbound_account_id orelse "none", std.json.fmt(msg.content, .{}) });
+        const out = (if (outbound_account_id) |aid|
+            bus_mod.makeOutboundWithAccount(allocator, msg.channel, aid, msg.chat_id, help_text)
+        else
+            bus_mod.makeOutbound(allocator, msg.channel, msg.chat_id, help_text)) catch return;
+        event_bus.publishOutbound(out) catch {
+            out.deinit(allocator);
+        };
+        return;
+    }
+
     if (session_mod.isSyncCommand(msg.content)) {
         if (is_slack_system_only) return;
         log.info("[sys] sync requested session={s} command={f}", .{ session_key, std.json.fmt(msg.content, .{}) });

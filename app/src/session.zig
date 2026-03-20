@@ -125,6 +125,14 @@ pub fn isSyncCommand(content: []const u8) bool {
     return detectSync(content);
 }
 
+fn detectHelp(content: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(std.mem.trim(u8, content, " \t\r\n"), ":help");
+}
+
+pub fn isHelpCommand(content: []const u8) bool {
+    return detectHelp(content);
+}
+
 fn detectDeleteDirective(content: []const u8) ?DeleteDirective {
     const trimmed = std.mem.trim(u8, content, " \t\r\n");
     if (!std.mem.startsWith(u8, trimmed, ":del")) return null;
@@ -154,6 +162,41 @@ pub fn isSystemOnlySlackAccount(config: *const Config, account_id: ?[]const u8) 
         }
     }
     return false;
+}
+
+pub fn shouldHandleSlackHelp(config: *const Config, account_id: ?[]const u8) bool {
+    return account_id != null and isSystemOnlySlackAccount(config, account_id);
+}
+
+fn loadHelpMessageFromRoot(allocator: Allocator, root: []const u8) ?[]u8 {
+    var current = root;
+    var depth: usize = 0;
+    while (depth < 4 and current.len > 0) : (depth += 1) {
+        const candidate = std.fs.path.join(allocator, &.{ current, ".knowledge", "command.md" }) catch return null;
+        defer allocator.free(candidate);
+
+        const file = std.fs.openFileAbsolute(candidate, .{}) catch {
+            current = std.fs.path.dirname(current) orelse break;
+            continue;
+        };
+        defer file.close();
+
+        return file.readToEndAlloc(allocator, 64 * 1024) catch null;
+    }
+    return null;
+}
+
+pub fn loadHelpMessage(allocator: Allocator, config: *const Config) ![]u8 {
+    if (config.project_dir.len > 0) {
+        if (loadHelpMessageFromRoot(allocator, config.project_dir)) |content| return content;
+    }
+    if (std.fs.path.dirname(config.config_path)) |config_dir| {
+        if (loadHelpMessageFromRoot(allocator, config_dir)) |content| return content;
+    }
+    return allocator.dupe(
+        u8,
+        "Help file not found. Expected `.knowledge/command.md` near the project root.",
+    );
 }
 
 /// Builds memory context from already-fetched entries.
@@ -2546,4 +2589,54 @@ test "isSystemOnlySlackAccount matches sys slack config" {
     try testing.expect(isSystemOnlySlackAccount(&cfg, "sys"));
     try testing.expect(!isSystemOnlySlackAccount(&cfg, "dev"));
     try testing.expect(!isSystemOnlySlackAccount(&cfg, null));
+}
+
+test "isHelpCommand detects standalone help" {
+    try testing.expect(isHelpCommand(":help"));
+    try testing.expect(isHelpCommand("  :help \n"));
+    try testing.expect(!isHelpCommand("/dev :help"));
+    try testing.expect(!isHelpCommand(":help me"));
+}
+
+test "shouldHandleSlackHelp only allows system-only slack account" {
+    const slack_accounts = [_]SlackConfig{
+        .{
+            .account_id = "sys",
+            .system_only = true,
+            .bot_token = "xoxb-sys",
+        },
+        .{
+            .account_id = "dev",
+            .bot_token = "xoxb-dev",
+        },
+    };
+    const cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = testing.allocator,
+        .channels = .{
+            .slack = &slack_accounts,
+        },
+    };
+
+    try testing.expect(shouldHandleSlackHelp(&cfg, "sys"));
+    try testing.expect(!shouldHandleSlackHelp(&cfg, "dev"));
+    try testing.expect(!shouldHandleSlackHelp(&cfg, null));
+
+    const no_sys_accounts = [_]SlackConfig{
+        .{
+            .account_id = "dev",
+            .bot_token = "xoxb-dev",
+        },
+    };
+    const no_sys_cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = testing.allocator,
+        .channels = .{
+            .slack = &no_sys_accounts,
+        },
+    };
+
+    try testing.expect(!shouldHandleSlackHelp(&no_sys_cfg, "dev"));
 }
