@@ -4501,6 +4501,42 @@ test "parse nostr channel missing required fields yields null" {
     try std.testing.expect(cfg3.channels.nostr == null);
 }
 
+test "parse actor config supports top-level sys slack account" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const json =
+        \\{
+        \\  "sys": {
+        \\    "channels": {
+        \\      "slack": {
+        \\        "account_id": "auto-detect",
+        \\        "mode": "socket",
+        \\        "bot_token": "xoxb-sys",
+        \\        "app_token": "xapp-sys",
+        \\        "allow_from": ["*"]
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+    var cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = allocator,
+    };
+    try cfg.parseActorConfig(json);
+
+    try std.testing.expectEqual(@as(usize, 0), cfg.agents.len);
+    try std.testing.expectEqual(@as(usize, 0), cfg.agent_bindings.len);
+    try std.testing.expectEqual(@as(usize, 1), cfg.channels.slack.len);
+    try std.testing.expectEqualStrings("sys", cfg.channels.slack[0].account_id);
+    try std.testing.expect(cfg.channels.slack[0].system_only);
+    try std.testing.expectEqualStrings("sys", cfg.channels.slack[0].agent_id.?);
+    try std.testing.expectEqualStrings("xoxb-sys", cfg.channels.slack[0].bot_token);
+}
+
 test "NostrConfig dm_relays default is auth.nostr1.com" {
     const cfg = config_types.NostrConfig{
         .private_key = "enc2:x",

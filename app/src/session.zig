@@ -28,6 +28,7 @@ const SecurityPolicy = @import("security/policy.zig").SecurityPolicy;
 const streaming = @import("streaming.zig");
 const thread_stacks = @import("thread_stacks.zig");
 const NamedAgentConfig = @import("config_types.zig").NamedAgentConfig;
+const SlackConfig = @import("config_types.zig").SlackConfig;
 const http_util = @import("http_util.zig");
 const log = std.log.scoped(.session);
 const MESSAGE_LOG_MAX_BYTES: usize = 4096;
@@ -58,6 +59,11 @@ const MemDirective = union(enum) {
     all,
     last: usize,
     query: []const u8,
+};
+
+pub const DeleteDirective = union(enum) {
+    all,
+    last: usize,
 };
 
 fn parseMemDirectiveBody(body: []const u8) ?MemDirective {
@@ -117,6 +123,37 @@ fn detectSync(content: []const u8) bool {
 
 pub fn isSyncCommand(content: []const u8) bool {
     return detectSync(content);
+}
+
+fn detectDeleteDirective(content: []const u8) ?DeleteDirective {
+    const trimmed = std.mem.trim(u8, content, " \t\r\n");
+    if (!std.mem.startsWith(u8, trimmed, ":del")) return null;
+
+    const after = trimmed[":del".len..];
+    if (after.len == 0) return null;
+    if (after[0] != ' ' and after[0] != '\t') return null;
+
+    const arg = std.mem.trim(u8, after[1..], " \t");
+    if (arg.len == 0) return null;
+    if (std.ascii.eqlIgnoreCase(arg, "all")) return .all;
+
+    const count = std.fmt.parseUnsigned(usize, arg, 10) catch return null;
+    if (count == 0) return null;
+    return .{ .last = count };
+}
+
+pub fn parseDeleteCommand(content: []const u8) ?DeleteDirective {
+    return detectDeleteDirective(content);
+}
+
+pub fn isSystemOnlySlackAccount(config: *const Config, account_id: ?[]const u8) bool {
+    const aid = account_id orelse return false;
+    for (config.channels.slack) |slack_cfg| {
+        if (std.mem.eql(u8, slack_cfg.account_id, aid)) {
+            return slack_cfg.system_only;
+        }
+    }
+    return false;
 }
 
 /// Builds memory context from already-fetched entries.
@@ -723,6 +760,73 @@ pub const SessionManager = struct {
         }
     }
 
+    const SlackSessionTarget = struct {
+        account_id: []const u8,
+        channel_id: []const u8,
+        bot_token: []const u8,
+    };
+
+    fn slackTargetForAccount(
+        self: *SessionManager,
+        account_id: []const u8,
+        channel_id: []const u8,
+    ) !SlackSessionTarget {
+        for (self.config.channels.slack) |sc| {
+            if (!std.mem.eql(u8, sc.account_id, account_id)) continue;
+            return .{
+                .account_id = sc.account_id,
+                .channel_id = channel_id,
+                .bot_token = sc.bot_token,
+            };
+        }
+        return error.NoSlackConfig;
+    }
+
+    fn resolveSlackSessionTarget(self: *SessionManager, session_key: []const u8) !SlackSessionTarget {
+        const agent_prefix = "agent:";
+        const slack_marker = ":slack:channel:";
+        const thread_marker = ":thread:";
+        const after_agent = if (std.mem.startsWith(u8, session_key, agent_prefix))
+            session_key[agent_prefix.len..]
+        else
+            session_key;
+        const slack_idx = std.mem.indexOf(u8, after_agent, slack_marker) orelse return error.NotSlackSession;
+        const extracted_id = after_agent[0..slack_idx];
+        const channel_with_thread = after_agent[slack_idx + slack_marker.len ..];
+        const channel_id = if (std.mem.indexOf(u8, channel_with_thread, thread_marker)) |thread_idx|
+            channel_with_thread[0..thread_idx]
+        else
+            channel_with_thread;
+
+        var resolved_account_id = extracted_id;
+        var resolved_slack_cfg: ?SlackConfig = null;
+        for (self.config.channels.slack) |sc| {
+            if (std.mem.eql(u8, sc.account_id, extracted_id)) {
+                resolved_slack_cfg = sc;
+                break;
+            }
+        }
+        if (resolved_slack_cfg == null) {
+            for (self.config.agent_bindings) |binding| {
+                const channel = binding.match.channel orelse continue;
+                const account_id = binding.match.account_id orelse continue;
+                if (!std.mem.eql(u8, channel, "slack")) continue;
+                if (!std.mem.eql(u8, binding.agent_id, extracted_id)) continue;
+                for (self.config.channels.slack) |sc| {
+                    if (std.mem.eql(u8, sc.account_id, account_id)) {
+                        resolved_account_id = sc.account_id;
+                        resolved_slack_cfg = sc;
+                        break;
+                    }
+                }
+                if (resolved_slack_cfg != null) break;
+            }
+        }
+
+        _ = resolved_slack_cfg orelse return error.NoSlackConfig;
+        return self.slackTargetForAccount(resolved_account_id, channel_id);
+    }
+
     /// Sync stored messages for the current session.
     /// For Slack sessions: compares against conversations.history and deletes orphaned messages.
     /// For other channels: clears stored messages with no message_id (stale records).
@@ -752,30 +856,13 @@ pub const SessionManager = struct {
     }
 
     fn syncSlackImpl(self: *SessionManager, session_key: []const u8) ![]const u8 {
-        const agent_prefix = "agent:";
-        const slack_marker = ":slack:channel:";
-        const after_agent = if (std.mem.startsWith(u8, session_key, agent_prefix))
-            session_key[agent_prefix.len..]
-        else
-            session_key;
-        const slack_idx = std.mem.indexOf(u8, after_agent, slack_marker) orelse return error.NotSlackSession;
-        const account_id = after_agent[0..slack_idx];
-        const channel_id = after_agent[slack_idx + slack_marker.len ..];
+        const target = try self.resolveSlackSessionTarget(session_key);
 
-        var bot_token: ?[]const u8 = null;
-        for (self.config.channels.slack) |sc| {
-            if (std.mem.eql(u8, sc.account_id, account_id)) {
-                bot_token = sc.bot_token;
-                break;
-            }
-        }
-        const token = bot_token orelse return error.NoSlackConfig;
+        log.info("sync: fetching Slack history for channel={s} account={s}", .{ target.channel_id, target.account_id });
 
-        log.info("sync: fetching Slack history for channel={s} account={s}", .{ channel_id, account_id });
-
-        const url = try std.fmt.allocPrint(self.allocator, "https://slack.com/api/conversations.history?channel={s}&limit=200", .{channel_id});
+        const url = try std.fmt.allocPrint(self.allocator, "https://slack.com/api/conversations.history?channel={s}&limit=200", .{target.channel_id});
         defer self.allocator.free(url);
-        const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{token});
+        const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{target.bot_token});
         defer self.allocator.free(auth_header);
 
         const resp_body = try http_util.curlGet(self.allocator, url, &.{auth_header}, "30");
@@ -815,6 +902,183 @@ pub const SessionManager = struct {
         }
 
         return try std.fmt.allocPrint(self.allocator, "Sync complete: {d} message(s) removed from history. Slack shows {d} live messages.", .{ deleted, live_ts.count() });
+    }
+
+    fn collectSlackDeletionTargets(
+        self: *SessionManager,
+        target: SlackSessionTarget,
+        directive: DeleteDirective,
+    ) ![][]u8 {
+        var targets: std.ArrayListUnmanaged([]u8) = .empty;
+        errdefer {
+            for (targets.items) |ts| self.allocator.free(ts);
+            targets.deinit(self.allocator);
+        }
+
+        var cursor: ?[]u8 = null;
+        defer if (cursor) |c| self.allocator.free(c);
+
+        const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{target.bot_token});
+        defer self.allocator.free(auth_header);
+
+        while (true) {
+            const remaining = switch (directive) {
+                .all => 200,
+                .last => |count| if (targets.items.len >= count) 0 else @min(count - targets.items.len, 200),
+            };
+            if (remaining == 0) break;
+
+            const url = if (cursor) |next_cursor|
+                try std.fmt.allocPrint(
+                    self.allocator,
+                    "https://slack.com/api/conversations.history?channel={s}&limit={d}&cursor={s}",
+                    .{ target.channel_id, remaining, next_cursor },
+                )
+            else
+                try std.fmt.allocPrint(
+                    self.allocator,
+                    "https://slack.com/api/conversations.history?channel={s}&limit={d}",
+                    .{ target.channel_id, remaining },
+                );
+            defer self.allocator.free(url);
+
+            const resp_body = try http_util.curlGet(self.allocator, url, &.{auth_header}, "30");
+            defer self.allocator.free(resp_body);
+
+            const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, resp_body, .{});
+            defer parsed.deinit();
+
+            var page_count: usize = 0;
+            if (parsed.value == .object) {
+                if (parsed.value.object.get("messages")) |msgs| {
+                    if (msgs == .array) {
+                        for (msgs.array.items) |item| {
+                            if (item != .object) continue;
+                            if (item.object.get("ts")) |ts| {
+                                if (ts == .string) {
+                                    try targets.append(self.allocator, try self.allocator.dupe(u8, ts.string));
+                                    page_count += 1;
+                                }
+                            }
+                            switch (directive) {
+                                .all => {},
+                                .last => |count| if (targets.items.len >= count) break,
+                            }
+                        }
+                    }
+                }
+            }
+            if (page_count == 0) break;
+
+            const next_cursor: ?[]const u8 = blk: {
+                if (parsed.value != .object) break :blk null;
+                if (parsed.value.object.get("response_metadata")) |meta| {
+                    if (meta == .object) {
+                        if (meta.object.get("next_cursor")) |cursor_val| {
+                            if (cursor_val == .string and cursor_val.string.len > 0) {
+                                break :blk cursor_val.string;
+                            }
+                        }
+                    }
+                }
+                break :blk null;
+            };
+            if (next_cursor == null) break;
+            if (cursor) |old_cursor| self.allocator.free(old_cursor);
+            cursor = try self.allocator.dupe(u8, next_cursor.?);
+        }
+
+        return targets.toOwnedSlice(self.allocator);
+    }
+
+    fn deleteSlackMessageByTs(self: *SessionManager, target: SlackSessionTarget, message_ts: []const u8) !bool {
+        const url = "https://slack.com/api/chat.delete";
+        const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{target.bot_token});
+        defer self.allocator.free(auth_header);
+        const body = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"{s}\",\"ts\":\"{s}\"}}",
+            .{ target.channel_id, message_ts },
+        );
+        defer self.allocator.free(body);
+
+        const resp_body = try http_util.curlPost(self.allocator, url, body, &.{auth_header});
+        defer self.allocator.free(resp_body);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, resp_body, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return false;
+        if (parsed.value.object.get("ok")) |ok_val| {
+            if (ok_val == .bool) return ok_val.bool;
+        }
+        return false;
+    }
+
+    pub fn deleteSlackMessages(self: *SessionManager, session_key: []const u8, directive: DeleteDirective) ![]const u8 {
+        const target = try self.resolveSlackSessionTarget(session_key);
+        return self.deleteSlackMessagesForAccount(target.account_id, target.channel_id, directive);
+    }
+
+    pub fn deleteSlackMessagesForAccount(
+        self: *SessionManager,
+        account_id: []const u8,
+        channel_id: []const u8,
+        directive: DeleteDirective,
+    ) ![]const u8 {
+        const target = try self.slackTargetForAccount(account_id, channel_id);
+        log.info("delete: fetching Slack history for channel={s} account={s}", .{ target.channel_id, target.account_id });
+
+        const targets = try self.collectSlackDeletionTargets(target, directive);
+        defer {
+            for (targets) |ts| self.allocator.free(ts);
+            self.allocator.free(targets);
+        }
+
+        var deleted: usize = 0;
+        var failed: usize = 0;
+        for (targets) |message_ts| {
+            if (self.deleteSlackMessageByTs(target, message_ts) catch false) {
+                deleted += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        var scope_label: []const u8 = "all";
+        var owned_scope_label: ?[]u8 = null;
+        defer if (owned_scope_label) |label| self.allocator.free(label);
+        switch (directive) {
+            .all => {},
+            .last => |count| {
+                owned_scope_label = std.fmt.allocPrint(self.allocator, "last {d}", .{count}) catch null;
+                scope_label = owned_scope_label orelse "last";
+            },
+        }
+
+        var failed_suffix: []const u8 = "";
+        var owned_failed_suffix: ?[]u8 = null;
+        defer if (owned_failed_suffix) |suffix| self.allocator.free(suffix);
+        if (failed > 0) {
+            owned_failed_suffix = std.fmt.allocPrint(
+                self.allocator,
+                " {d} message(s) could not be deleted.",
+                .{failed},
+            ) catch null;
+            failed_suffix = owned_failed_suffix orelse "";
+        }
+
+        return try std.fmt.allocPrint(
+            self.allocator,
+            "Delete complete: removed {d}/{d} message(s) from Slack channel {s} using account {s} ({s}).{s}",
+            .{
+                deleted,
+                targets.len,
+                target.channel_id,
+                target.account_id,
+                scope_label,
+                failed_suffix,
+            },
+        );
     }
 
     /// Process a message within a session context and optionally forward text deltas.
@@ -2238,4 +2502,43 @@ test "reloadSkillsAll does not affect session count" {
 
     _ = sm.reloadSkillsAll();
     try testing.expectEqual(@as(usize, 2), sm.sessionCount());
+}
+
+test "parseDeleteCommand parses last and all" {
+    const last = parseDeleteCommand(":del 30");
+    try testing.expect(last != null);
+    try testing.expectEqual(@as(usize, 30), last.?.last);
+
+    const all = parseDeleteCommand(":del all");
+    try testing.expect(all != null);
+    try testing.expect(all.? == .all);
+
+    try testing.expect(parseDeleteCommand(":del 0") == null);
+    try testing.expect(parseDeleteCommand("hello") == null);
+}
+
+test "isSystemOnlySlackAccount matches sys slack config" {
+    const slack_accounts = [_]SlackConfig{
+        .{
+            .account_id = "sys",
+            .system_only = true,
+            .bot_token = "xoxb-sys",
+        },
+        .{
+            .account_id = "dev",
+            .bot_token = "xoxb-dev",
+        },
+    };
+    const cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = testing.allocator,
+        .channels = .{
+            .slack = &slack_accounts,
+        },
+    };
+
+    try testing.expect(isSystemOnlySlackAccount(&cfg, "sys"));
+    try testing.expect(!isSystemOnlySlackAccount(&cfg, "dev"));
+    try testing.expect(!isSystemOnlySlackAccount(&cfg, null));
 }

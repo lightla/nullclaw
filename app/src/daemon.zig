@@ -136,6 +136,132 @@ pub fn hasSupervisedChannels(config: *const Config) bool {
 /// Shutdown signal — set to true to stop the daemon.
 var shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
+const SLACK_SYNC_GROUP_TTL_SECS: i64 = 300;
+
+const SlackSyncGroupState = struct {
+    expected_mask: u64,
+    completed_mask: u64 = 0,
+    updated_at: i64,
+};
+
+var slack_sync_groups_mu: std.Thread.Mutex = .{};
+var slack_sync_groups: std.StringHashMapUnmanaged(SlackSyncGroupState) = .empty;
+
+fn slackSyncParticipantCount(config: *const Config) usize {
+    var count: usize = 0;
+    for (config.channels.slack) |acc| {
+        if (acc.system_only) continue;
+        count += 1;
+    }
+    return count;
+}
+
+fn slackSyncExpectedMask(config: *const Config) ?u64 {
+    const count = slackSyncParticipantCount(config);
+    if (count == 0 or count > 64) return null;
+    if (count == 64) return std.math.maxInt(u64);
+    return (@as(u64, 1) << @as(std.math.Log2Int(u64), @intCast(count))) - 1;
+}
+
+fn slackSyncAccountBit(config: *const Config, account_id: ?[]const u8) ?u64 {
+    const aid = account_id orelse return null;
+    const participant_count = slackSyncParticipantCount(config);
+    if (participant_count == 0 or participant_count > 64) return null;
+    var participant_idx: usize = 0;
+    for (config.channels.slack) |acc| {
+        if (acc.system_only) continue;
+        if (std.mem.eql(u8, acc.account_id, aid)) {
+            if (participant_idx >= 64) return null;
+            return @as(u64, 1) << @as(std.math.Log2Int(u64), @intCast(participant_idx));
+        }
+        participant_idx += 1;
+    }
+    return null;
+}
+
+fn resolveSlackCommandChannelId(chat_id: []const u8, meta: channel_adapters.InboundMetadata) []const u8 {
+    if (meta.channel_id) |channel_id| return channel_id;
+    if (std.mem.indexOfScalar(u8, chat_id, ':')) |idx| return chat_id[0..idx];
+    return chat_id;
+}
+
+fn buildSlackSyncGroupKey(
+    allocator: std.mem.Allocator,
+    chat_id: []const u8,
+    meta: channel_adapters.InboundMetadata,
+) ?[]u8 {
+    const channel_id = meta.channel_id orelse if (chat_id.len > 0) chat_id else return null;
+    const message_id = meta.message_id orelse return null;
+    return std.fmt.allocPrint(allocator, "{s}:{s}", .{ channel_id, message_id }) catch null;
+}
+
+fn sweepSlackSyncGroupsLocked(allocator: std.mem.Allocator, now_ts: i64) void {
+    var stale_keys: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer stale_keys.deinit(allocator);
+
+    var it = slack_sync_groups.iterator();
+    while (it.next()) |entry| {
+        if (now_ts - entry.value_ptr.updated_at < SLACK_SYNC_GROUP_TTL_SECS) continue;
+        stale_keys.append(allocator, entry.key_ptr.*) catch return;
+    }
+
+    for (stale_keys.items) |owned_key| {
+        _ = slack_sync_groups.remove(owned_key);
+        allocator.free(owned_key);
+    }
+}
+
+fn noteSlackSyncCompletion(
+    allocator: std.mem.Allocator,
+    config: *const Config,
+    group_key: []const u8,
+    account_id: ?[]const u8,
+) bool {
+    const expected_mask = slackSyncExpectedMask(config) orelse return false;
+    const account_bit = slackSyncAccountBit(config, account_id) orelse return false;
+    const now_ts = std.time.timestamp();
+
+    slack_sync_groups_mu.lock();
+    defer slack_sync_groups_mu.unlock();
+
+    sweepSlackSyncGroupsLocked(allocator, now_ts);
+
+    const gop = slack_sync_groups.getOrPut(allocator, group_key) catch return false;
+    if (!gop.found_existing) {
+        gop.key_ptr.* = allocator.dupe(u8, group_key) catch {
+            _ = slack_sync_groups.remove(group_key);
+            return false;
+        };
+        gop.value_ptr.* = .{
+            .expected_mask = expected_mask,
+            .updated_at = now_ts,
+        };
+    }
+
+    gop.value_ptr.expected_mask = expected_mask;
+    gop.value_ptr.completed_mask |= account_bit;
+    gop.value_ptr.updated_at = now_ts;
+
+    if (gop.value_ptr.completed_mask != gop.value_ptr.expected_mask) return false;
+
+    const owned_key = gop.key_ptr.*;
+    _ = slack_sync_groups.remove(owned_key);
+    allocator.free(owned_key);
+    return true;
+}
+
+fn clearSlackSyncGroups(allocator: std.mem.Allocator) void {
+    slack_sync_groups_mu.lock();
+    defer slack_sync_groups_mu.unlock();
+
+    var it = slack_sync_groups.iterator();
+    while (it.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
+    }
+    slack_sync_groups.deinit(allocator);
+    slack_sync_groups = .empty;
+}
+
 /// Request a graceful shutdown of the daemon.
 pub fn requestShutdown() void {
     shutdown_requested.store(true, .release);
@@ -828,8 +954,12 @@ fn inboundMsgWorker(ctx: *InboundMsgWorkerCtx) void {
         .participants = participants,
     };
 
+    const is_slack_system_only = std.mem.eql(u8, msg.channel, "slack") and
+        session_mod.isSystemOnlySlackAccount(runtime.config, outbound_account_id);
+
     // System commands — handled directly, no agent involved.
     if (session_mod.isSyncCommand(msg.content)) {
+        if (is_slack_system_only) return;
         log.info("[sys] sync requested session={s} command={f}", .{ session_key, std.json.fmt(msg.content, .{}) });
         const sync_result = runtime.session_mgr.syncChannel(session_key) catch |err| blk: {
             log.warn("[sys] :sync failed: {}", .{err});
@@ -848,6 +978,22 @@ fn inboundMsgWorker(ctx: *InboundMsgWorkerCtx) void {
                 },
             );
         }
+        if (std.mem.eql(u8, msg.channel, "slack")) {
+            if (buildSlackSyncGroupKey(allocator, msg.chat_id, parsed_meta.fields)) |group_key| {
+                defer allocator.free(group_key);
+                if (noteSlackSyncCompletion(allocator, runtime.config, group_key, outbound_account_id) and !builtin.is_test) {
+                    std.debug.print(
+                        "[sync] sync all completed channel={s} message_id={s} accounts={d} command={f}\n",
+                        .{
+                            parsed_meta.fields.channel_id orelse msg.chat_id,
+                            parsed_meta.fields.message_id orelse "unknown",
+                            slackSyncParticipantCount(runtime.config),
+                            std.json.fmt(msg.content, .{}),
+                        },
+                    );
+                }
+            }
+        }
         if (!std.mem.eql(u8, msg.channel, "slack")) {
             const out = (if (outbound_account_id) |aid|
                 bus_mod.makeOutboundWithAccount(allocator, msg.channel, aid, msg.chat_id, sync_result)
@@ -858,6 +1004,36 @@ fn inboundMsgWorker(ctx: *InboundMsgWorkerCtx) void {
             };
         }
         return;
+    }
+
+    if (std.mem.eql(u8, msg.channel, "slack")) {
+        if (session_mod.parseDeleteCommand(msg.content)) |delete_directive| {
+            if (is_slack_system_only and outbound_account_id != null) {
+                const channel_id = resolveSlackCommandChannelId(msg.chat_id, parsed_meta.fields);
+                const account_id = outbound_account_id.?;
+                log.info(
+                    "[sys] delete requested account={s} channel={s} command={f}",
+                    .{ account_id, channel_id, std.json.fmt(msg.content, .{}) },
+                );
+                const delete_result = runtime.session_mgr.deleteSlackMessagesForAccount(account_id, channel_id, delete_directive) catch |err| blk: {
+                    log.warn("[sys] :del failed: {}", .{err});
+                    break :blk allocator.dupe(u8, "Delete failed.") catch return;
+                };
+                defer allocator.free(delete_result);
+                log.info("[sys] delete done: {s}", .{delete_result});
+                if (!builtin.is_test) {
+                    std.debug.print(
+                        "[del] account={s} channel={s} command={f} slack_reply_suppressed=true result={f}\n",
+                        .{ account_id, channel_id, std.json.fmt(msg.content, .{}), std.json.fmt(delete_result, .{}) },
+                    );
+                }
+            }
+            return;
+        }
+
+        if (is_slack_system_only) {
+            return;
+        }
     }
 
     if (parsed_meta.fields.message_deleted) {
@@ -1896,6 +2072,70 @@ test "parseInboundMetadata extracts message_id and thread_id" {
     try std.testing.expectEqualStrings("C1", parsed.fields.channel_id.?);
     try std.testing.expectEqualStrings("1700.1", parsed.fields.message_id.?);
     try std.testing.expectEqualStrings("1700.0", parsed.fields.thread_id.?);
+}
+
+test "noteSlackSyncCompletion completes after all slack accounts report" {
+    const allocator = std.testing.allocator;
+    clearSlackSyncGroups(allocator);
+    defer clearSlackSyncGroups(allocator);
+
+    const slack_accounts = [_]@import("config_types.zig").SlackConfig{
+        .{
+            .account_id = "dev",
+            .bot_token = "token-dev",
+        },
+        .{
+            .account_id = "mentor",
+            .bot_token = "token-mentor",
+        },
+    };
+    const config = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = allocator,
+        .channels = .{
+            .slack = &slack_accounts,
+        },
+    };
+
+    try std.testing.expect(!noteSlackSyncCompletion(allocator, &config, "C123:1700.1", "dev"));
+    try std.testing.expect(noteSlackSyncCompletion(allocator, &config, "C123:1700.1", "mentor"));
+    try std.testing.expect(!noteSlackSyncCompletion(allocator, &config, "C123:1700.1", "dev"));
+}
+
+test "slack sync helpers ignore system-only accounts" {
+    const allocator = std.testing.allocator;
+    clearSlackSyncGroups(allocator);
+    defer clearSlackSyncGroups(allocator);
+
+    const slack_accounts = [_]@import("config_types.zig").SlackConfig{
+        .{
+            .account_id = "dev",
+            .bot_token = "token-dev",
+        },
+        .{
+            .account_id = "sys",
+            .system_only = true,
+            .bot_token = "token-sys",
+        },
+        .{
+            .account_id = "mentor",
+            .bot_token = "token-mentor",
+        },
+    };
+    const config = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = allocator,
+        .channels = .{
+            .slack = &slack_accounts,
+        },
+    };
+
+    try std.testing.expectEqual(@as(usize, 2), slackSyncParticipantCount(&config));
+    try std.testing.expect(!noteSlackSyncCompletion(allocator, &config, "C123:1700.1", "dev"));
+    try std.testing.expect(!noteSlackSyncCompletion(allocator, &config, "C123:1700.1", "sys"));
+    try std.testing.expect(noteSlackSyncCompletion(allocator, &config, "C123:1700.1", "mentor"));
 }
 
 test "resolveSlackStatusTarget prefers thread_id then falls back to message_id" {

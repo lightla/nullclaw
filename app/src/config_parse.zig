@@ -1811,6 +1811,72 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
     }
 }
 
+fn parseActorSlackChannelConfig(
+    self: *Config,
+    slack_val: std.json.Value,
+    default_account_id: []const u8,
+    agent_id: ?[]const u8,
+    system_only: bool,
+) !?types.SlackConfig {
+    if (slack_val != .object) return null;
+
+    const bot_token_v = slack_val.object.get("bot_token") orelse return null;
+    if (bot_token_v != .string) return null;
+
+    const account_id: []const u8 = blk: {
+        if (slack_val.object.get("account_id")) |aid| {
+            if (aid == .string and !std.mem.eql(u8, aid.string, "auto-detect")) {
+                break :blk try self.allocator.dupe(u8, aid.string);
+            }
+        }
+        break :blk try self.allocator.dupe(u8, default_account_id);
+    };
+
+    var slack_cfg = types.SlackConfig{
+        .account_id = account_id,
+        .agent_id = if (agent_id) |id| try self.allocator.dupe(u8, id) else null,
+        .system_only = system_only,
+        .bot_token = try self.allocator.dupe(u8, bot_token_v.string),
+    };
+
+    if (slack_val.object.get("mode")) |v| {
+        if (v == .string and std.mem.eql(u8, v.string, "http")) {
+            slack_cfg.mode = .http;
+        }
+    }
+    if (slack_val.object.get("app_token")) |v| {
+        if (v == .string) slack_cfg.app_token = try self.allocator.dupe(u8, v.string);
+    }
+    if (slack_val.object.get("signing_secret")) |v| {
+        if (v == .string) slack_cfg.signing_secret = try self.allocator.dupe(u8, v.string);
+    }
+    if (slack_val.object.get("webhook_path")) |v| {
+        if (v == .string) slack_cfg.webhook_path = try self.allocator.dupe(u8, v.string);
+    }
+    if (slack_val.object.get("dm_policy")) |v| {
+        if (v == .string) slack_cfg.dm_policy = try self.allocator.dupe(u8, v.string);
+    }
+    if (slack_val.object.get("group_policy")) |v| {
+        if (v == .string) slack_cfg.group_policy = try self.allocator.dupe(u8, v.string);
+    }
+    if (slack_val.object.get("reply_to_mode")) |v| {
+        if (v == .string and std.mem.eql(u8, v.string, "all")) {
+            slack_cfg.reply_to_mode = .all;
+        }
+    }
+    if (slack_val.object.get("allow_from")) |v| {
+        if (v == .array) slack_cfg.allow_from = try parseStringArray(self.allocator, v.array);
+    }
+    if (slack_val.object.get("bot_id")) |v| {
+        if (v == .string) slack_cfg.bot_id = try self.allocator.dupe(u8, v.string);
+    }
+    if (slack_val.object.get("bot_name")) |v| {
+        if (v == .string) slack_cfg.bot_name = try self.allocator.dupe(u8, v.string);
+    }
+
+    return slack_cfg;
+}
+
 /// Parse actor.config.json and merge actors into self.agents, self.agent_bindings,
 /// and self.channels.slack.
 ///
@@ -1820,11 +1886,20 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
 ///       "channels": {
 ///         "slack": { "bot_token", "app_token", ... }
 ///       }
-///   } } }
+///   } },
+///     "sys": {
+///       "channels": {
+///         "slack": { "bot_token", "app_token", ... }
+///       }
+///   } }
 ///
 /// account_id in channels.slack:
 ///   - "auto-detect" or omitted → uses the actor key (e.g. "dev") as account_id
 ///   - explicit value           → uses that value
+///
+/// sys.channels.slack:
+///   - merged as a system-only Slack account with default account_id "sys"
+///   - does not create an AI agent binding
 ///
 /// channel_id is intentionally NOT required — slack.zig calls discoverMyChannels()
 /// at startup to auto-detect joined channels via the Slack API.
@@ -1836,135 +1911,115 @@ pub fn parseActorConfig(self: *Config, content: []const u8) !void {
     const root = parsed.value;
     if (root != .object) return;
 
-    const actors_val = root.object.get("actors") orelse return;
-    if (actors_val != .object) return;
-
     var new_agents = std.ArrayListUnmanaged(types.NamedAgentConfig).empty;
     var new_bindings = std.ArrayListUnmanaged(agent_routing.AgentBinding).empty;
     var new_slack = std.ArrayListUnmanaged(types.SlackConfig).empty;
 
-    // Collect names already defined in config.json so we don't duplicate.
-    var existing_names = std.StringHashMapUnmanaged(void).empty;
-    defer existing_names.deinit(self.allocator);
-    for (self.agents) |a| {
-        try existing_names.put(self.allocator, a.name, {});
-    }
-
-    var iter = actors_val.object.iterator();
-    while (iter.next()) |entry| {
-        const actor_name = entry.key_ptr.*;
-        const actor_val = entry.value_ptr.*;
-        if (actor_val != .object) continue;
-        if (existing_names.contains(actor_name)) continue;
-
-        const provider_val = actor_val.object.get("provider") orelse continue;
-        const model_val = actor_val.object.get("model") orelse continue;
-        if (provider_val != .string or model_val != .string) continue;
-
-        var agent_cfg = types.NamedAgentConfig{
-            .name = try self.allocator.dupe(u8, actor_name),
-            .provider = try self.allocator.dupe(u8, provider_val.string),
-            .model = try self.allocator.dupe(u8, model_val.string),
-        };
-        if (actor_val.object.get("system_prompt")) |sp| {
-            if (sp == .string) agent_cfg.system_prompt = try self.allocator.dupe(u8, sp.string);
-        }
-        if (actor_val.object.get("api_key")) |ak| {
-            if (ak == .string) agent_cfg.api_key = try self.allocator.dupe(u8, ak.string);
-        }
-        if (actor_val.object.get("temperature")) |t| {
-            if (t == .float) agent_cfg.temperature = t.float;
-            if (t == .integer) agent_cfg.temperature = @floatFromInt(t.integer);
-        }
-        if (actor_val.object.get("max_depth")) |md| {
-            if (md == .integer) agent_cfg.max_depth = @intCast(md.integer);
-        }
-        if (actor_val.object.get("fallbackModel")) |fb| {
-            if (fb == .string and !std.mem.eql(u8, fb.string, "default")) {
-                agent_cfg.fallback_model = try self.allocator.dupe(u8, fb.string);
+    if (root.object.get("actors")) |actors_val| {
+        if (actors_val == .object) {
+            // Collect names already defined in config.json so we don't duplicate.
+            var existing_names = std.StringHashMapUnmanaged(void).empty;
+            defer existing_names.deinit(self.allocator);
+            for (self.agents) |a| {
+                try existing_names.put(self.allocator, a.name, {});
             }
-        }
-        try new_agents.append(self.allocator, agent_cfg);
 
-        // Parse channels.slack → SlackConfig + AgentBinding.
-        const channels_val = actor_val.object.get("channels") orelse continue;
-        if (channels_val != .object) continue;
+            var iter = actors_val.object.iterator();
+            while (iter.next()) |entry| {
+                const actor_name = entry.key_ptr.*;
+                const actor_val = entry.value_ptr.*;
+                if (actor_val != .object) continue;
+                if (existing_names.contains(actor_name)) continue;
 
-        if (channels_val.object.get("slack")) |slack_val| {
-            if (slack_val != .object) continue;
+                const provider_val = actor_val.object.get("provider") orelse continue;
+                const model_val = actor_val.object.get("model") orelse continue;
+                if (provider_val != .string or model_val != .string) continue;
 
-            const bot_token_v = slack_val.object.get("bot_token") orelse continue;
-            if (bot_token_v != .string) continue;
-
-            // account_id: "auto-detect" or missing → use actor key.
-            const account_id: []const u8 = blk: {
-                if (slack_val.object.get("account_id")) |aid| {
-                    if (aid == .string and !std.mem.eql(u8, aid.string, "auto-detect")) {
-                        break :blk try self.allocator.dupe(u8, aid.string);
+                var agent_cfg = types.NamedAgentConfig{
+                    .name = try self.allocator.dupe(u8, actor_name),
+                    .provider = try self.allocator.dupe(u8, provider_val.string),
+                    .model = try self.allocator.dupe(u8, model_val.string),
+                };
+                if (actor_val.object.get("system_prompt")) |sp| {
+                    if (sp == .string) agent_cfg.system_prompt = try self.allocator.dupe(u8, sp.string);
+                }
+                if (actor_val.object.get("api_key")) |ak| {
+                    if (ak == .string) agent_cfg.api_key = try self.allocator.dupe(u8, ak.string);
+                }
+                if (actor_val.object.get("temperature")) |t| {
+                    if (t == .float) agent_cfg.temperature = t.float;
+                    if (t == .integer) agent_cfg.temperature = @floatFromInt(t.integer);
+                }
+                if (actor_val.object.get("max_depth")) |md| {
+                    if (md == .integer) agent_cfg.max_depth = @intCast(md.integer);
+                }
+                if (actor_val.object.get("fallbackModel")) |fb| {
+                    if (fb == .string and !std.mem.eql(u8, fb.string, "default")) {
+                        agent_cfg.fallback_model = try self.allocator.dupe(u8, fb.string);
                     }
                 }
-                break :blk try self.allocator.dupe(u8, actor_name);
-            };
+                try new_agents.append(self.allocator, agent_cfg);
 
-            var slack_cfg = types.SlackConfig{
-                .account_id = account_id,
-                .agent_id = try self.allocator.dupe(u8, actor_name),
-                .bot_token = try self.allocator.dupe(u8, bot_token_v.string),
-            };
+                const channels_val = actor_val.object.get("channels") orelse continue;
+                if (channels_val != .object) continue;
 
-            if (slack_val.object.get("app_token")) |v| {
-                if (v == .string) slack_cfg.app_token = try self.allocator.dupe(u8, v.string);
-            }
-            if (slack_val.object.get("signing_secret")) |v| {
-                if (v == .string) slack_cfg.signing_secret = try self.allocator.dupe(u8, v.string);
-            }
-            if (slack_val.object.get("webhook_path")) |v| {
-                if (v == .string) slack_cfg.webhook_path = try self.allocator.dupe(u8, v.string);
-            }
-            if (slack_val.object.get("dm_policy")) |v| {
-                if (v == .string) slack_cfg.dm_policy = try self.allocator.dupe(u8, v.string);
-            }
-            if (slack_val.object.get("group_policy")) |v| {
-                if (v == .string) slack_cfg.group_policy = try self.allocator.dupe(u8, v.string);
-            }
-            if (slack_val.object.get("reply_to_mode")) |v| {
-                if (v == .string) {
-                    if (std.mem.eql(u8, v.string, "all")) slack_cfg.reply_to_mode = .all;
+                if (channels_val.object.get("slack")) |slack_val| {
+                    const slack_cfg = (try parseActorSlackChannelConfig(
+                        self,
+                        slack_val,
+                        actor_name,
+                        actor_name,
+                        false,
+                    )) orelse continue;
+
+                    try new_bindings.append(self.allocator, .{
+                        .agent_id = try self.allocator.dupe(u8, actor_name),
+                        .match = .{
+                            .channel = try self.allocator.dupe(u8, "slack"),
+                            .account_id = try self.allocator.dupe(u8, slack_cfg.account_id),
+                        },
+                    });
+                    try new_slack.append(self.allocator, slack_cfg);
                 }
             }
-            if (slack_val.object.get("allow_from")) |v| {
-                if (v == .array) slack_cfg.allow_from = try parseStringArray(self.allocator, v.array);
-            }
-            // channel_id intentionally omitted — auto-detected via discoverMyChannels().
-
-            try new_slack.append(self.allocator, slack_cfg);
-            try new_bindings.append(self.allocator, .{
-                .agent_id = try self.allocator.dupe(u8, actor_name),
-                .match = .{
-                    .channel = try self.allocator.dupe(u8, "slack"),
-                    .account_id = try self.allocator.dupe(u8, account_id),
-                },
-            });
         }
     }
 
-    if (new_agents.items.len == 0) return;
+    if (root.object.get("sys")) |sys_val| {
+        if (sys_val == .object) {
+            if (sys_val.object.get("channels")) |channels_val| {
+                if (channels_val == .object) {
+                    if (channels_val.object.get("slack")) |slack_val| {
+                        if (try parseActorSlackChannelConfig(self, slack_val, "sys", "sys", true)) |slack_cfg| {
+                            try new_slack.append(self.allocator, slack_cfg);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (new_agents.items.len == 0 and new_slack.items.len == 0) return;
 
     // Merge agents.
-    var merged_agents = try std.ArrayListUnmanaged(types.NamedAgentConfig).initCapacity(
-        self.allocator, self.agents.len + new_agents.items.len,
-    );
-    try merged_agents.appendSlice(self.allocator, self.agents);
-    try merged_agents.appendSlice(self.allocator, new_agents.items);
-    self.agents = try merged_agents.toOwnedSlice(self.allocator);
+    if (new_agents.items.len > 0) {
+        var merged_agents = try std.ArrayListUnmanaged(types.NamedAgentConfig).initCapacity(
+            self.allocator, self.agents.len + new_agents.items.len,
+        );
+        try merged_agents.appendSlice(self.allocator, self.agents);
+        try merged_agents.appendSlice(self.allocator, new_agents.items);
+        self.agents = try merged_agents.toOwnedSlice(self.allocator);
+    }
 
     // Merge bindings.
-    var merged_bindings = try std.ArrayListUnmanaged(agent_routing.AgentBinding).initCapacity(
-        self.allocator, self.agent_bindings.len + new_bindings.items.len,
-    );
-    try merged_bindings.appendSlice(self.allocator, self.agent_bindings);
-    try merged_bindings.appendSlice(self.allocator, new_bindings.items);
-    self.agent_bindings = try merged_bindings.toOwnedSlice(self.allocator);
+    if (new_bindings.items.len > 0) {
+        var merged_bindings = try std.ArrayListUnmanaged(agent_routing.AgentBinding).initCapacity(
+            self.allocator, self.agent_bindings.len + new_bindings.items.len,
+        );
+        try merged_bindings.appendSlice(self.allocator, self.agent_bindings);
+        try merged_bindings.appendSlice(self.allocator, new_bindings.items);
+        self.agent_bindings = try merged_bindings.toOwnedSlice(self.allocator);
+    }
 
     // Sync fallback_model into reliability.model_fallbacks.
     // Only add entries that don't already exist in the fallbacks list.

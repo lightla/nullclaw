@@ -280,6 +280,8 @@ pub const SlackConfig = struct {
     account_id: []const u8 = "default",
     /// Resolved at startup from bindings config. Not read from JSON directly.
     agent_id: ?[]const u8 = null,
+    /// System-only Slack account: never routes to AI turns, only system commands/tools.
+    system_only: bool = false,
     mode: SlackReceiveMode = .socket,
     bot_token: []const u8,
     app_token: ?[]const u8 = null,

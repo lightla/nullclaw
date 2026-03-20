@@ -2192,6 +2192,10 @@ fn handleSlackWebhookRoute(ctx: *WebhookHandlerContext) void {
             .participants = participants,
         };
         if (session_mod.isSyncCommand(text)) {
+            if (slack_cfg.system_only) {
+                ctx.response_body = "{\"status\":\"ok\"}";
+                return;
+            }
             log.info("[sys] slack sync requested session={s} command={f}", .{ sk, std.json.fmt(text, .{}) });
             const sync_result = sm.syncChannel(sk) catch |err| blk: {
                 log.warn("[sys] slack sync failed: {}", .{err});
@@ -2207,6 +2211,34 @@ fn handleSlackWebhookRoute(ctx: *WebhookHandlerContext) void {
                     );
                 }
             }
+            ctx.response_body = "{\"status\":\"ok\"}";
+            return;
+        }
+        if (session_mod.parseDeleteCommand(text)) |delete_directive| {
+            if (slack_cfg.system_only) {
+                log.info(
+                    "[sys] slack delete requested account={s} channel={s} command={f}",
+                    .{ slack_cfg.account_id, channel_id, std.json.fmt(text, .{}) },
+                );
+                const delete_result = sm.deleteSlackMessagesForAccount(slack_cfg.account_id, channel_id, delete_directive) catch |err| blk: {
+                    log.warn("[sys] slack delete failed: {}", .{err});
+                    break :blk null;
+                };
+                if (delete_result) |result| {
+                    defer ctx.root_allocator.free(result);
+                    log.info("[sys] slack delete done: {s}", .{result});
+                    if (!builtin.is_test) {
+                        std.debug.print(
+                            "[del] account={s} channel={s} command={f} slack_reply_suppressed=true result={f}\n",
+                            .{ slack_cfg.account_id, channel_id, std.json.fmt(text, .{}), std.json.fmt(result, .{}) },
+                        );
+                    }
+                }
+            }
+            ctx.response_body = "{\"status\":\"ok\"}";
+            return;
+        }
+        if (slack_cfg.system_only) {
             ctx.response_body = "{\"status\":\"ok\"}";
             return;
         }

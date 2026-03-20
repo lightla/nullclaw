@@ -1,4 +1,24 @@
 {
+  "sys": {
+    "familyName": "Sys",
+    "system_prompt": "No call Agent",
+    "channels": {
+      "slack": {
+        "account_id": "auto-detect",
+        "mode": "socket",
+        "bot_token": "xoxb-10679218407473-10770109945200-wEnMcUzA93Zwd5Iu7YvsxyG8",
+        "app_token": "xapp-1-A0AMRRFQVRU-10726480502359-1b52d98384424c455701d0b42b3ca6bbfe8793095447603dbabaeed47928330f",
+        "signing_secret": null,
+        "webhook_path": "/slack/events",
+        "allow_from": [
+          "*"
+        ],
+        "dm_policy": "pairing",
+        "group_policy": "open",
+        "reply_to_mode": "all"
+      }
+    }
+  },
   "actors": {
     "dev": {
       "familyName": "Dev",
