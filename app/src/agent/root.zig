@@ -684,7 +684,8 @@ pub const Agent = struct {
     }
 
     fn providerAuthStatus(self: *const Agent, provider_name: []const u8) []const u8 {
-        if (providers.classifyProvider(provider_name) == .openai_codex_provider) {
+        const kind = providers.classifyProvider(provider_name);
+        if (kind == .openai_codex_provider or kind == .codex_cli_provider) {
             return "oauth";
         }
 

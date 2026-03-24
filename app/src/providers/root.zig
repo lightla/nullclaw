@@ -274,11 +274,11 @@ pub const ChatRequest = struct {
     timeout_secs: u64 = 0,
     /// Reasoning effort for reasoning models (o1, o3, gpt-5*). null = don't send.
     reasoning_effort: ?[]const u8 = null,
-    /// gemini-cli / claude-cli: directory for storing session state files (.initialized, session_id).
+    /// gemini-cli / claude-cli / codex-cli: directory for storing session state files.
     /// Each NullClaw session maps to a unique directory so session metadata is isolated.
     /// null = no session isolation.
     gemini_session_cwd: ?[]const u8 = null,
-    /// gemini-cli / claude-cli: working directory for the subprocess (the actual project).
+    /// gemini-cli / claude-cli / codex-cli: working directory for the subprocess (the actual project).
     /// When set, subprocesses spawn with this CWD so they see the correct project files.
     /// null = falls back to gemini_session_cwd for backward compatibility.
     workspace_dir: ?[]const u8 = null,

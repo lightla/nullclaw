@@ -2192,6 +2192,10 @@ fn handleSlackWebhookRoute(ctx: *WebhookHandlerContext) void {
             .participants = participants,
         };
         if (session_mod.isHelpCommand(text)) {
+            const cfg = ctx.config_opt orelse {
+                ctx.response_body = "{\"status\":\"ok\"}";
+                return;
+            };
             if (!session_mod.shouldHandleSlackHelp(cfg, slack_cfg.account_id)) {
                 ctx.response_body = "{\"status\":\"ok\"}";
                 return;

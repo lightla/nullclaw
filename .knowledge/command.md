@@ -18,7 +18,7 @@ nullclaw workspace append
 
 
 -- sửa .envrc cần chạy 
-direnv allow 
+direnv allow go version
 
 
 ## SLACK COMMAND 

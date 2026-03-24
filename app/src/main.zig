@@ -273,7 +273,7 @@ fn runGateway(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
         std.process.exit(1);
     };
 
-    // Check both sub_args and global args for --verbose flag 
+    // Check both sub_args and global args for --verbose flag
     var verbose = hasVerboseFlag(sub_args);
     if (!verbose) {
         // Also check global args for --verbose flag
@@ -1766,7 +1766,8 @@ fn hasReliabilityCredentialFallback(allocator: std.mem.Allocator, config: *const
     }
 
     for (config.reliability.fallback_providers) |provider_name| {
-        if (yc.providers.classifyProvider(provider_name) == .openai_codex_provider) return true;
+        const kind = yc.providers.classifyProvider(provider_name);
+        if (kind == .openai_codex_provider or kind == .codex_cli_provider) return true;
 
         const resolved = yc.providers.resolveApiKeyFromConfig(
             allocator,
@@ -1798,10 +1799,10 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
     ) catch null;
     defer if (resolved_api_key) |k| allocator.free(k);
 
-    // OAuth providers (openai-codex) don't need an API key
+    // OAuth-backed providers (openai-codex, codex-cli) don't need a direct API key here.
     const provider_kind = yc.providers.classifyProvider(config.default_provider);
     const has_fallback_credentials = hasReliabilityCredentialFallback(allocator, config);
-    if (resolved_api_key == null and provider_kind != .openai_codex_provider and !has_fallback_credentials) {
+    if (resolved_api_key == null and provider_kind != .openai_codex_provider and provider_kind != .codex_cli_provider and !has_fallback_credentials) {
         std.debug.print("No API key configured. Set env var or add to ~/.nullclaw/config.json:\n", .{});
         std.debug.print("  \"providers\": {{ \"{s}\": {{ \"api_key\": \"...\" }} }}\n", .{config.default_provider});
         std.process.exit(1);
@@ -2140,10 +2141,10 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
     ) catch null;
     defer if (resolved_api_key) |k| allocator.free(k);
 
-    // OAuth providers (openai-codex) don't need an API key
+    // OAuth-backed providers (openai-codex, codex-cli) don't need a direct API key here.
     const provider_kind = yc.providers.classifyProvider(config.default_provider);
     const has_fallback_credentials = hasReliabilityCredentialFallback(allocator, &config);
-    if (resolved_api_key == null and provider_kind != .openai_codex_provider and !has_fallback_credentials) {
+    if (resolved_api_key == null and provider_kind != .openai_codex_provider and provider_kind != .codex_cli_provider and !has_fallback_credentials) {
         std.debug.print("No API key configured. Set env var or add to ~/.nullclaw/config.json:\n", .{});
         std.debug.print("  \"providers\": {{ \"{s}\": {{ \"api_key\": \"...\" }} }}\n", .{config.default_provider});
         std.process.exit(1);

@@ -47,7 +47,8 @@ pub const RuntimeProviderBundle = struct {
             cfg.getProviderUserAgent(cfg.default_provider),
         );
 
-        const allows_key_rotation = factory.classifyProvider(cfg.default_provider) != .openai_codex_provider;
+        const provider_kind = factory.classifyProvider(cfg.default_provider);
+        const allows_key_rotation = provider_kind != .openai_codex_provider and provider_kind != .codex_cli_provider;
         var rotating_key_count: usize = 0;
         if (allows_key_rotation) {
             for (cfg.reliability.api_keys) |raw_key| {
