@@ -1,0 +1,125 @@
+{
+  "sys": {
+    "familyName": "Sys",
+    "system_prompt": "No call Agent",
+    "channels": {
+      "slack": {
+        "account_id": "auto-detect",
+        "mode": "socket",
+        "bot_token": "xoxb-10679218407473-10770109945200-wEnMcUzA93Zwd5Iu7YvsxyG8",
+        "user_token": "xoxp-10679218407473-10666302934114-10770490537008-fbabfee9e8efdf820425c916318b1eee",
+        "app_token": "xapp-1-A0AMRRFQVRU-10726480502359-1b52d98384424c455701d0b42b3ca6bbfe8793095447603dbabaeed47928330f",
+        "signing_secret": null,
+        "webhook_path": "/slack/events",
+        "allow_from": [
+          "*"
+        ],
+        "dm_policy": "pairing",
+        "group_policy": "open",
+        "reply_to_mode": "all"
+      }
+    }
+  },
+  "actors": {
+    "dev": {
+      "familyName": "Dev",
+      "system_prompt": "Bạn là một Senior Developer thực chiến.",
+      "model": "gemini-3-flash-preview",
+      "fallbackModel": "gemini-3-flash-preview",
+      "provider": "gemini-cli",
+      "channels": {
+        "slack": {
+          "account_id": "auto-detect",
+          "mode": "socket",
+          "bot_token": "xoxb-10679218407473-10659934432403-2LlmHlGhJ1JdXsnX4NcRWMYC",
+          "app_token": "xapp-1-A0AKJ8D8HJS-10664291378502-ed5a8b3bdca13a1d12af90b24bb1cf780eaf8abde2da98c3d71a936bd4ed6ef9",
+          "signing_secret": null,
+          "webhook_path": "/slack/events",
+          "allow_from": [
+            "*"
+          ],
+          "dm_policy": "pairing",
+          "group_policy": "open",
+          "reply_to_mode": "all",
+          "bot_id": null,
+          "bot_name": null
+        }
+      }
+    },
+    "mentor": {
+      "familyName": "Mentor",
+      "system_prompt": "Bạn là một Senior Mentor, Project Manager dày dạn kinh nghiệm.",
+      "model": "gemini-3.1-pro-preview",
+      "fallbackModel": "gemini-3-flash-preview",
+      "provider": "gemini-cli",
+      "channels": {
+        "slack": {
+          "account_id": "auto-detect",
+          "mode": "socket",
+          "bot_token": "xoxb-10679218407473-10662892102085-6LhH1rToDhoV5pM8GW1AgfQ3",
+          "app_token": "xapp-1-A0AKDTTAEBV-10664308299638-280c8837fa5b4c30398fdddb0dc8dc1a4269a0495740886536bab0946f5ff505",
+          "signing_secret": null,
+          "webhook_path": "/slack/events",
+          "allow_from": [
+            "*"
+          ],
+          "dm_policy": "pairing",
+          "group_policy": "open",
+          "reply_to_mode": "all",
+          "bot_id": null,
+          "bot_name": null
+        }
+      }
+    },
+    "cdev": {
+      "familyName": "Dev",
+      "system_prompt": "Bạn là một Senior Developer thực chiến.",
+      "model": "claude-sonnet-4-5",
+      "fallbackModel": "claude-haiku-4-5-20251001",
+      "provider": "claude-cli",
+      "channels": {
+        "slack": {
+          "account_id": "auto-detect",
+          "mode": "socket",
+          "bot_token": "xoxb-10679218407473-10659934432403-2LlmHlGhJ1JdXsnX4NcRWMYC",
+          "app_token": "xapp-1-A0AKJ8D8HJS-10664291378502-ed5a8b3bdca13a1d12af90b24bb1cf780eaf8abde2da98c3d71a936bd4ed6ef9",
+          "signing_secret": null,
+          "webhook_path": "/slack/events",
+          "allow_from": [
+            "*"
+          ],
+          "dm_policy": "pairing",
+          "group_policy": "open",
+          "reply_to_mode": "all",
+          "bot_id": null,
+          "bot_name": null
+        }
+      }
+    },
+    "cmentor": {
+      "familyName": "Mentor",
+      "system_prompt": "Bạn là một Senior Mentor, Project Manager dày dạn kinh nghiệm.",
+      "model": "claude-opus-4-6",
+      "fallbackModel": "claude-sonnet-4-5",
+      "provider": "claude-cli",
+      "channels": {
+        "slack": {
+          "account_id": "auto-detect",
+          "mode": "socket",
+          "bot_token": "xoxb-10679218407473-10662892102085-6LhH1rToDhoV5pM8GW1AgfQ3",
+          "app_token": "xapp-1-A0AKDTTAEBV-10664308299638-280c8837fa5b4c30398fdddb0dc8dc1a4269a0495740886536bab0946f5ff505",
+          "signing_secret": null,
+          "webhook_path": "/slack/events",
+          "allow_from": [
+            "*"
+          ],
+          "dm_policy": "pairing",
+          "group_policy": "open",
+          "reply_to_mode": "all",
+          "bot_id": null,
+          "bot_name": null
+        }
+      }
+    }
+  }
+}
