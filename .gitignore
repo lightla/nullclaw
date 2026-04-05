@@ -17,10 +17,12 @@ reference/
 result
 .direnv/
 .worktrees
-config.signal.json
-config.json
+
 config/config.json
-config/actor.config.json
+dist/actor.config.json
+dist/llm_token_usage.jsonl
+
+
 
 # IDE configurations
 .idea/
