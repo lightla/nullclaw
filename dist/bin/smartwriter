@@ -1,0 +1,2 @@
+#!/bin/bash
+node /home/light/workspace/ai/smartwriter-mcp/dist/index.js "$@"
